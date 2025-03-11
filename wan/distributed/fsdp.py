@@ -10,8 +10,8 @@ from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 def shard_model(
     model,
     device_id,
-    param_dtype=torch.float32,
-    # param_dtype=torch.bfloat16,
+    # param_dtype=torch.float32,
+    param_dtype=torch.bfloat16,
     reduce_dtype=torch.float32,
     buffer_dtype=torch.float32,
     process_group=None,
