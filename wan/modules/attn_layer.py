@@ -214,7 +214,7 @@ class xFuserLongContextAttention(LongContextAttention):
                         q_dtype = query_layer.dtype
                         pad_size = ((q_seqlen // 256) + 1) * 256 - q_seqlen
                         height_padding = torch.zeros([query_layer_list[i].shape[0], query_layer_list[i].shape[1], pad_size,
-                                                      query_layer_list[i].shape[2]], dtype=q_dtype, device=query_layer.device)
+                                                      query_layer_list[i].shape[-1]], dtype=q_dtype, device=query_layer.device)
                         query = torch.cat([query_layer_list[i], height_padding], dim=-2).to(torch.float16)
                         key = torch.cat([key_layer_list[i], height_padding], dim=-2).to(torch.float16)
                         value = torch.cat([value_layer_list[i], height_padding], dim=-2).to(torch.float16)
