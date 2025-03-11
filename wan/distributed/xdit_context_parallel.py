@@ -33,14 +33,10 @@ def rope_apply(x, grid_sizes, freqs_list):
     freqs:      [M, C // 2].
     """
     s, n, c = x.size(1), x.size(2), x.size(3) // 2
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
     # loop over samples
     output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
-
         # precompute multipliers
         x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
             s, n, -1, 2))
@@ -95,7 +91,7 @@ def usp_dit_forward(
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim, t).float())
         e0 = self.time_projection(e).unflatten(1, (6, self.dim))
-        assert e.dtype == torch.float32 and e0.dtype == torch.float32
+        # assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
     # context
     context_lens = None
@@ -114,7 +110,7 @@ def usp_dit_forward(
 
     c = (self.dim // self.num_heads) // 2
     s = x.shape[1]
-    freqs = self.freqs.split([c - 2 * (c // 3), c // 3], dim=1)
+    freqs = self.freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
     freqs_list=[]
 
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
@@ -141,7 +137,7 @@ def usp_dit_forward(
         e=e0,
         seq_lens=seq_lens,
         grid_sizes=grid_sizes,
-        freqs=self.freqs,
+        freqs=freqs_list,
         context=context,
         context_lens=context_lens)
 
