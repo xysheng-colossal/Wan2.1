@@ -442,7 +442,7 @@ def generate(args):
             t5_cpu=args.t5_cpu,
         )
 
-        logging.info("Generating {'image' if 't2i' in args.task else 'video'} ...")
+        logging.info(f"Warm up 2 steps...")
         video = wan_i2v.generate(
             args.prompt,
             img,
