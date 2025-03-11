@@ -57,7 +57,8 @@ class xFuserLongContextAttention(LongContextAttention):
         # self.args = args
         self.video_size = [[720, 1280], [1280, 720], [960, 960]]
 
-        self.algo = 0
+        self.algo = -1
+        # self.algo = 0
         # self.algo = int(os.getenv('ALGO'))
         self.self_attention = None
         if self.algo == 1:
