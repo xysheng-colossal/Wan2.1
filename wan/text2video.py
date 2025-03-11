@@ -79,7 +79,7 @@ class WanT2V:
         self.patch_size = config.patch_size
         self.vae = WanVAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
-            device=self.device
+            device=self.device,
             dtype=self.param_dtype)
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
