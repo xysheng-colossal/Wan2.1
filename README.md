@@ -64,27 +64,27 @@ pip install torch_npu-{pytorchversion}.xxxx.{arch}.whl
 ### 2.1 权重及配置文件说明
 1. Wan2.1-T2V-1.3B权重链接:
 ```shell
-  https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
+https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
 ```
 2. Wan2.1-T2V-14B权重链接
 ```shell
-  https://huggingface.co/Wan-AI/Wan2.1-T2V-14B
+https://huggingface.co/Wan-AI/Wan2.1-T2V-14B
 ```
 3. Wan2.1-I2V-480P权重链接:
 ```shell
-  https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P
+https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P
 ```
 4. Wan2.1-I2V-720P权重链接
 ```shell
-  https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P
+https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P
 ```
 
 ## 三、Wan2.1使用
 
 ### 3.1 下载到本地
 ```shell
-   git clone https://modelers.cn/MindIE/Wan2.1.git
-   cd Wan2.1
+git clone https://modelers.cn/MindIE/Wan2.1.git
+cd Wan2.1
 ```
 
 ### 3.2 Wan2.1-T2V-1.3B
@@ -104,7 +104,7 @@ python generate.py  \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
 ```
 参数说明：
-- task: 权重路径，包含vae、text_encoder、Tokenizer、Transformer和Scheduler五个模型的配置文件及权重。
+- task: 任务类型。
 - ckpt_dir: 模型的权重路径
 - size: 生成视频的高和宽
 - prompt: 文本提示词
@@ -166,7 +166,9 @@ torchrun --nproc_per_node=16 generate.py \
 ### 3.4 Wan2.1-I2V-14B
 使用上一步下载的权重
 ```shell
+# 生成480P的视频
 model_base="./Wan2.1-I2V-14B-480P/"
+# 生成720P的视频
 model_base="./Wan2.1-I2V-14B-720P/"
 ```
 
@@ -174,7 +176,6 @@ model_base="./Wan2.1-I2V-14B-720P/"
 
 执行命令：
 ```shell
-# Wan2.1-I2V-14B 支持双卡、四卡、八卡、十六卡
 torchrun --nproc_per_node=8 generate.py \
 --task i2v-14B \
 --size 832*480 \
@@ -196,7 +197,6 @@ torchrun --nproc_per_node=8 generate.py \
 #### 3.3.2 16卡性能测试
 执行命令：
 ```shell
-
 torchrun --nproc_per_node=16 generate.py \
 --task i2v-14B \
 --size 832*480 \
