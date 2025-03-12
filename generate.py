@@ -25,8 +25,6 @@ from wan.utils.utils import cache_video, cache_image, str2bool
 from mindiesd import CacheConfig, CacheAgent
 
 
-torch.ops.load_library("/home/gwn/test_la/0304/plugin/build/libPTAExtensionOPS.so")
-
 EXAMPLE_PROMPT = {
     "t2v-1.3B": {
         "prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.",

@@ -92,13 +92,8 @@ pip install torch_npu-{pytorchversion}.xxxx.{arch}.whl
 使用上一步下载的权重
 ```shell
 model_base="./Wan2.1-T2V-1.3B/"
-model_base="./Wan2.1-T2V-14B/"
-model_base="./Wan2.1-I2V-14B-480P/"
-model_base="./Wan2.1-I2V-14B-720P/"
 ```
-
 #### 3.2.1 单卡性能测试
-
 执行命令：
 ```shell
 # Wan2.1-T2V-1.3B
@@ -112,7 +107,6 @@ python generate.py  \
 - task: 权重路径，包含vae、text_encoder、Tokenizer、Transformer和Scheduler五个模型的配置文件及权重。
 - ckpt_dir: 模型的权重路径
 - size: 生成视频的高和宽
-- infer-steps: 推理步数
 - prompt: 文本提示词
 
 #### 3.2.2 多卡性能测试
@@ -122,13 +116,16 @@ python generate.py  \
 torchrun --nproc_per_node=4 generate.py \
 --task t2v-14B \
 --size 832*480 \
---ckpt_dir ./Wan2.1-T2V-14B \
+--ckpt_dir ${model_base} \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 4 \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-
 ```
+参数说明：
+- dit_fsdp: DiT使用FSDP
+- t5_fsdp: T5使用FSDP
+- ulysses_size: ulysses并行数
 
 ### 3.3 Wan2.1-T2V-14B
 使用上一步下载的权重
@@ -136,28 +133,9 @@ torchrun --nproc_per_node=4 generate.py \
 model_base="./Wan2.1-T2V-14B/"
 ```
 
-#### 3.3.1 单卡性能测试
-
+#### 3.3.1 8卡性能测试
 执行命令：
 ```shell
-# Wan2.1-T2V-14B
-python generate.py  \
---task t2v-14B \
---size 1280*720 \
---ckpt_dir ${model_base} \
---prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-```
-参数说明：
-- task: 权重路径，包含vae、text_encoder、Tokenizer、Transformer和Scheduler五个模型的配置文件及权重。
-- ckpt_dir: 模型的权重路径
-- size: 生成视频的高和宽
-- infer-steps: 推理步数
-- prompt: 文本提示词
-
-#### 3.3.2 多卡性能测试
-执行命令：
-```shell
-# 14B支持单卡、双卡、四卡和八卡
 torchrun --nproc_per_node=8 generate.py \
 --task t2v-14B \
 --size 1280*720 \
@@ -166,8 +144,24 @@ torchrun --nproc_per_node=8 generate.py \
 --t5_fsdp \
 --ulysses_size 8 \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-
 ```
+
+#### 3.3.2 16卡性能测试
+执行命令：
+```shell
+torchrun --nproc_per_node=16 generate.py \
+--task t2v-14B \
+--size 1280*720 \
+--ckpt_dir ./Wan2.1-T2V-14B \
+--dit_fsdp \
+--t5_fsdp \
+--ring_size 2 \
+--ulysses_size 8 \
+--prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
+```
+
+参数说明：
+- ring_size: ring并行数
 
 ### 3.4 Wan2.1-I2V-14B
 使用上一步下载的权重
@@ -176,37 +170,45 @@ model_base="./Wan2.1-I2V-14B-480P/"
 model_base="./Wan2.1-I2V-14B-720P/"
 ```
 
-#### 3.3.1 单卡性能测试
+#### 3.3.1 8卡性能测试
 
 执行命令：
 ```shell
-# Wan2.1-T2V-14B
-python generate.py  \
---task t2v-14B \
---size 1280*720 \
---ckpt_dir ${model_base} \
---prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-```
-参数说明：
-- task: 权重路径，包含vae、text_encoder、Tokenizer、Transformer和Scheduler五个模型的配置文件及权重。
-- ckpt_dir: 模型的权重路径
-- size: 生成视频的高和宽
-- infer-steps: 推理步数
-- prompt: 文本提示词
-
-#### 3.3.2 多卡性能测试
-执行命令：
-```shell
-# 14B支持单卡、双卡、四卡和八卡
+# Wan2.1-I2V-14B 支持双卡、四卡、八卡、十六卡
 torchrun --nproc_per_node=8 generate.py \
---task t2v-14B \
---size 1280*720 \
---ckpt_dir ./Wan2.1-T2V-14B \
+--task i2v-14B \
+--size 832*480 \
+--ckpt_dir ${model_base} \
+--frame_num 81 \
+--sample_steps 40 \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 8 \
---prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
+--image examples/i2v_input.JPG \
+--prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
+```
+参数说明：
+- size: 生成视频的分辨率，支持1280*720、832*480、720*480等
+- frame_num: 生成视频的帧数
+- image: 用于生成视频的图片路径
+- sample_steps: 推理步数
 
+#### 3.3.2 16卡性能测试
+执行命令：
+```shell
+
+torchrun --nproc_per_node=16 generate.py \
+--task i2v-14B \
+--size 832*480 \
+--ckpt_dir ${model_base} \
+--frame_num 81 \
+--sample_steps 40 \
+--dit_fsdp \
+--t5_fsdp \
+--ring_size 2 \
+--ulysses_size 8 \
+--image examples/i2v_input.JPG \
+--prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
 ```
 
 

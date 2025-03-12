@@ -19,7 +19,7 @@ import torch.distributed as dist
 
 MAX_TOKEN = 2147483647
 
-def all_to_all_v(
+def all_to_all_v1(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -34,7 +34,6 @@ def all_to_all_v(
     self_attention = kwargs.get("self_attention", None)
     world_size = dist.get_world_size()
     rank = dist.get_rank()
-    # len_joint = joint_tensor_key.shape[1]
     global SEQ
     b, s, n, d = k.shape
     each_n = int(n // world_size)
@@ -52,28 +51,33 @@ def all_to_all_v(
     query = torch.cat(output_q_list, dim=gather_dim).contiguous().transpose(1, 2)
     key = torch.cat(output_k_list, dim=gather_dim).contiguous().transpose(1, 2)
     value = torch.cat(output_v_list, dim=gather_dim).contiguous().transpose(1, 2)
-
     query_layer_list = query.split(1, dim=1)
     key_layer_list = key.split(1, dim=1)
     value_layer_list = value.split(1, dim=1)
     output = []
     for_loop = query.shape[1]
     for i in range(for_loop):
-        if algo == 1:
-            seqlen = torch.tensor([[query.shape[2]], [key.shape[2]]], dtype=torch.int32)
-            intensors = [query_layer_list[i], key_layer_list[i], value_layer_list[i], seqlen]
-            out = self_attention.forward(intensors)[0]
-        elif algo == 0:
+        if algo == 0:
             out = torch_npu.npu_fusion_attention(
                 query_layer_list[i],
                 key_layer_list[i],
                 value_layer_list[i],
                 head_num=1,
                 input_layout="BNSD",
-                scale=query_layer_list[i].shape[-1]**-0.5,
+                scale=query.shape[-1]**-0.5,
                 pre_tockens=MAX_TOKEN,
                 next_tockens=MAX_TOKEN
             )[0]
+        elif algo == 1:
+            q_seqlen = query_layer_list[0].shape[2]
+            q_dtype = query.dtype
+            head_dim = query.shape[-1]
+
+            query, key, value = la_preprocess_input(query, key, value)
+            _, out = torch.ops.mindie.la_mindie_sd(query, key, value, None, None, None, \
+                query.shape[-1]**-0.5, 1, "BNSD", 1.0, MAX_TOKEN, 1, True)
+            out = la_postprocess_output(out, q_dtype, q_seqlen, head_dim)
+
         output.append(out)
     output = torch.cat(output, dim=1)
     output = output.transpose(1, 2)
@@ -85,6 +89,100 @@ def all_to_all_v(
     output_con = [chunk.contiguous() for chunk in torch.split(output, SEQ_joint, dim=gather_dim)]
 
     dist.all_to_all(output_list, output_con)
+    output = torch.cat(output_list, dim=scatter_dim)
+
+    return output
+
+def all_to_all_v2(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    joint_tensor_key: torch.Tensor,
+    joint_tensor_value: torch.Tensor,
+    ulysses_pg: None,
+    ring_pg: None,
+    scatter_dim: int,
+    gather_dim: int,
+    **kwargs
+):
+    ulysses_ranks_even = [0, 2, 4, 6, 8, 10, 12, 14]
+    ulysses_ranks_odd = [1, 3, 5, 7, 9, 11, 13, 15]
+    scale = kwargs.get("scale", 1.0)
+    algo = kwargs.get("algo", 0)
+    self_attention = kwargs.get("self_attention", None)
+    ulysses_world_size = dist.get_world_size(ulysses_pg)
+    rank = dist.get_rank()
+
+    b, s, n, d = k.shape
+    each_n = int(n // ulysses_world_size)
+
+    target_ranks = ulysses_ranks_even if rank in ulysses_ranks_even else ulysses_ranks_odd
+    
+    output_q_list = [torch.empty([b, SEQ[rank_idx], each_n, d], device=q.device, dtype=q.dtype) for rank_idx in target_ranks]
+    output_k_list = [torch.empty([b, SEQ[rank_idx], each_n, d], device=k.device, dtype=k.dtype) for rank_idx in target_ranks]
+    output_v_list = [torch.empty([b, SEQ[rank_idx], each_n, d], device=v.device, dtype=v.dtype) for rank_idx in target_ranks]
+    q_list = [t.contiguous() for t in torch.tensor_split(q, ulysses_world_size, scatter_dim)]
+    k_list = [t.contiguous() for t in torch.tensor_split(k, ulysses_world_size, scatter_dim)]
+    v_list = [t.contiguous() for t in torch.tensor_split(v, ulysses_world_size, scatter_dim)]    
+    dist.all_to_all(output_q_list, q_list, group=ulysses_pg)
+    dist.all_to_all(output_k_list, k_list, group=ulysses_pg)
+    dist.all_to_all(output_v_list, v_list, group=ulysses_pg)
+
+    query_layer = torch.cat(output_q_list, dim=gather_dim).contiguous().transpose(1, 2)
+    key = torch.cat(output_k_list, dim=gather_dim).contiguous()
+    value = torch.cat(output_v_list, dim=gather_dim).contiguous()
+
+    if rank in ulysses_ranks_odd:
+        b, s, n, d = key.shape
+        pad_s = SEQ[0] * 8 - s
+        padding = torch.zeros([b, pad_s, n, d], dtype=key.dtype, device=key.device)
+        key = torch.cat([key, padding], dim=gather_dim)
+        value = torch.cat([value, padding], dim=gather_dim)
+    b, s, n, d = key.shape
+    k_full = torch.empty([2, b, s, n, d], dtype=key.dtype, device=key.device)
+    v_full = torch.empty([2, b, s, n, d], dtype=value.dtype, device=value.device)
+    dist.all_gather_into_tensor(k_full, key, group=ring_pg)
+    dist.all_gather_into_tensor(v_full, value, group=ring_pg)
+    k_full = k_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+    v_full = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+    key_layer = k_full[:, :sum(SEQ), :, :]
+    value_layer = v_full[:, :sum(SEQ), :, :]
+
+    if algo == 0:
+        out = torch_npu.npu_fusion_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            head_num=query_layer.shape[1],
+            input_layout="BNSD",
+            scale=query_layer.shape[-1]**-0.5,
+            pre_tockens=MAX_TOKEN,
+            next_tockens=MAX_TOKEN
+        )[0]
+        out = out.transpose(1, 2)
+    elif algo == 1:
+        q_seqlen = query_layer.shape[2]
+        q_dtype = query_layer.dtype
+        head_dim = query_layer.shape[-1]
+
+        query, key, value = la_preprocess_input(query_layer, key_layer, value_layer)
+        _, out = torch.ops.mindie.la_mindie_sd(query, key, value, None, None, None, \
+            query_layer.shape[-1]**-0.5, 5, "BNSD", 1.0, MAX_TOKEN, 1, True)
+        out = la_postprocess_output(out, q_dtype, q_seqlen, head_dim)
+        out = out.transpose(1, 2)
+    else:
+        raise ValueError(f"select flash attention algorithm only support 0, 1, but got f{algo}")
+
+    output_shape = [b, SEQ[rank], each_n, d]
+    output_list = [torch.empty(output_shape, device=out.device, dtype=out.dtype) for _ in ulysses_ranks_even]
+
+    if rank in ulysses_ranks_even:
+        SEQ_joint = [SEQ[rank] for rank in ulysses_ranks_even]
+    else:
+        SEQ_joint = [SEQ[rank] for rank in ulysses_ranks_odd]
+    
+    output_con = [chunk.contiguous() for chunk in torch.split(out, SEQ_joint, dim=gather_dim)]
+    dist.all_to_all(output_list, output_con, group=ulysses_pg)
     output = torch.cat(output_list, dim=scatter_dim)
 
     return output
@@ -124,3 +222,37 @@ def gather_sequence(input_, dim=1):
     SEQ = None
 
     return output
+
+
+def pad(input, base=256, dim=-2):
+    shape_value = input.size(dim)
+    if shape_value % base == 0:
+        return input
+    pad_size = ((shape_value // base) + 1) * base - shape_value
+    padding_shape = list(input.shape)
+    padding_shape[dim] = pad_size
+    padding = torch.zeros(padding_shape, dtype=input.dtype, device=input.device)
+    return torch.cat([input, padding], dim=dim)
+
+
+def la_preprocess_input(query, key, value):
+    if query.dtype != torch.float16:
+        query = query.to(torch.float16)
+        key = key.to(torch.float16)
+        value = value.to(torch.float16)
+    
+    query = pad(query, 256, -2)
+    query = pad(query, 128, -1)
+    key = pad(key, 256, -2)
+    key = pad(key, 128, -1)
+    value = pad(value, 256, -2)
+    value = pad(value, 128, -1)
+
+    return query, key, value
+
+
+def la_postprocess_output(out, dtype, q_seqlen, head_dim):
+    if out.dtype != dtype:
+        out = out.to(dtype)
+    out = out[:, :, :q_seqlen, :head_dim]
+    return out
