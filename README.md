@@ -64,19 +64,19 @@ pip install torch_npu-{pytorchversion}.xxxx.{arch}.whl
 ### 2.1 权重及配置文件说明
 1. Wan2.1-T2V-1.3B权重链接:
 ```shell
-   https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
+  https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
 ```
 2. Wan2.1-T2V-14B权重链接
 ```shell
-   https://huggingface.co/Wan-AI/Wan2.1-T2V-14B
+  https://huggingface.co/Wan-AI/Wan2.1-T2V-14B
 ```
 3. Wan2.1-I2V-480P权重链接:
 ```shell
-   https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P
+  https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P
 ```
 4. Wan2.1-I2V-720P权重链接
 ```shell
-   https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P
+  https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P
 ```
 
 ## 三、Wan2.1使用
