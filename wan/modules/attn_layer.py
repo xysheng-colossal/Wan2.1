@@ -111,8 +111,9 @@ class xFuserLongContextAttention(LongContextAttention):
             if self.world_size == 2 or self.world_size == 4 or self.world_size == 8:
                 # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
                 # scatter 2, gather 1
+                print("query:", query.shape)
                 if self.use_pack_qkv:
-                    qkv = torch.cat([query, key, value]).continous()
+                    qkv = torch.cat([query, key, value]).contiguous()
                     qkv = SeqAllToAll4D.apply(
                         self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
                     )
@@ -127,6 +128,8 @@ class xFuserLongContextAttention(LongContextAttention):
                     value_layer = SeqAllToAll4D.apply(
                         self.ulysses_pg, value, self.scatter_idx, self.gather_idx
                     )
+                print("query_layer:", query_layer.shape)
+                
             elif self.world_size == 16:
                 # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
                 # scatter 2, gather 1
