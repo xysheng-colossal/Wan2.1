@@ -61,7 +61,7 @@ class xFuserLongContextAttention(LongContextAttention):
         if self.algo == 1:
             import mindiesd
             from mindiesd.layers.flash_attn.attention_forward import attention_forward
-            mindiesd_plugin_path = os.path.join(mindiesd.__path__[0], "/plugin/libPTAExtensionOPS.so")
+            mindiesd_plugin_path = os.path.join(mindiesd.__path__[0], '/plugin/libPTAExtensionOPS.so')
 
             if os.path.exists(mindiesd_plugin_path):
                 torch.ops.load_library(mindiesd_plugin_path)
