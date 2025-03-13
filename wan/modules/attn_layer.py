@@ -59,7 +59,15 @@ class xFuserLongContextAttention(LongContextAttention):
 
         self.algo = int(os.getenv('ALGO', 0))
         if self.algo == 1:
-            torch.ops.load_library("/home/gwn/test_la/0304/plugin/build/libPTAExtensionOPS.so")
+            import mindiesd
+            from mindiesd.layers.flash_attn.attention_forward import attention_forward
+            mindiesd_plugin_path = os.path.join(mindiesd.__path__, "/plugin/libPTAExtensionOPS.so")
+
+            if os.path.exists(mindiesd_plugin_path):
+                torch.ops.load_library(mindiesd_plugin_path)
+            else:
+                raise FileNotFoundError(f"file {mindiesd_plugin_path} does not exists.")
+                
         self.self_attention = None
 
     def forward(
@@ -116,7 +124,6 @@ class xFuserLongContextAttention(LongContextAttention):
                     qkv = SeqAllToAll4D.apply(
                         self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
                     )
-                    qkv = qkv.transpose(1, 2)
                     query_layer, key_layer, value_layer = torch.chunk(qkv, 3, dim=0)
                 else:
                     query_layer = SeqAllToAll4D.apply(
@@ -128,9 +135,6 @@ class xFuserLongContextAttention(LongContextAttention):
                     value_layer = SeqAllToAll4D.apply(
                         self.ulysses_pg, value, self.scatter_idx, self.gather_idx
                     )
-                    query_layer = query_layer.transpose(1, 2)
-                    key_layer = key_layer.transpose(1, 2)
-                    value_layer = value_layer.transpose(1, 2)
                 
             elif self.world_size == 16:
                 # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
@@ -145,34 +149,16 @@ class xFuserLongContextAttention(LongContextAttention):
                 b, s, n, d = key_value_layer.shape
                 kv_full = torch.empty([2, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
                 dist.all_gather_into_tensor(kv_full, key_value_layer, group=self.ring_pg)
-                kv_full = kv_full.permute(1, 3, 0, 2, 4).reshape(b, n, -1, d)
-
-                query_layer = query_layer.transpose(1, 2)
+                kv_full = kv_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
                 key_layer, value_layer = kv_full.chunk(2, dim=0)
 
             if use_all_head:
                 if self.algo == 0:
-                    out = torch_npu.npu_fusion_attention(
-                            query_layer,
-                            key_layer,
-                            value_layer,
-                            head_num=query_layer.shape[1],
-                            input_layout="BNSD",
-                            scale=query_layer.shape[-1]**-0.5,
-                            pre_tockens=MAX_TOKEN,
-                            next_tockens=MAX_TOKEN
-                        )[0]
-                    out = out.transpose(1, 2)
+                    out = attention_forward(query_layer, key_layer, value_layer,
+                                            opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
                 elif self.algo == 1:
-                    q_seqlen = query_layer.shape[2]
-                    q_dtype = query_layer.dtype
-                    head_dim = query_layer.shape[-1]
-
-                    query, key, value = la_preprocess_input(query_layer, key_layer, value_layer)
-                    _, out = torch.ops.mindie.la_mindie_sd(query, key, value, None, None, None, \
-                        query_layer.shape[-1]**-0.5, 5, "BNSD", 1.0, MAX_TOKEN, 1, True)
-                    out = la_postprocess_output(out, q_dtype, q_seqlen, head_dim)
-                    out = out.transpose(1, 2)
+                    out = attention_forward(query_layer, key_layer, value_layer,
+                                            opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
                 else:
                     raise ValueError(f"select flash attention algorithm only support 0, 1, but got f{self.algo}")
 
@@ -184,25 +170,13 @@ class xFuserLongContextAttention(LongContextAttention):
                 for_loop = query_layer.shape[1]
                 for i in range(for_loop):
                     if self.algo == 0:
-                        out = torch_npu.npu_fusion_attention(
-                            query_layer_list[i],
-                            key_layer_list[i],
-                            value_layer_list[i],
-                            head_num=1,
-                            input_layout="BNSD",
-                            scale=query.shape[-1]**-0.5,
-                            pre_tockens=MAX_TOKEN,
-                            next_tockens=MAX_TOKEN
-                        )[0]
+                        out = attention_forward(query_layer_list[i], key_layer_list[i], value_layer_list[i],
+                                            opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
                     elif self.algo == 1:
-                        q_seqlen = query_layer_list[i].shape[2]
-                        q_dtype = query_layer.dtype
-                        head_dim = query_layer_list[i].shape[-1]
-
-                        query, key, value = la_preprocess_input(query_layer_list[i], key_layer_list[i], value_layer_list[i])
-                        _, out = torch.ops.mindie.la_mindie_sd(query, key, value, None, None, None, \
-                            query_layer.shape[-1]**-0.5, 1, "BNSD", 1.0, MAX_TOKEN, 1, True)
-                        out = la_postprocess_output(out, q_dtype, q_seqlen, head_dim)
+                        out = attention_forward(query_layer_list[i], key_layer_list[i], value_layer_list[i],
+                                            opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
+                    else:
+                        raise ValueError(f"select flash attention algorithm only support 0, 1, but got f{self.algo}")
 
                     output.append(out)
                 out_concat = torch.cat(output, dim=1)
