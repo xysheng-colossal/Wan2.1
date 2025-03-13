@@ -114,7 +114,7 @@ python generate.py  \
 ```shell
 # 1.3B支持单卡、双卡、四卡
 torchrun --nproc_per_node=4 generate.py \
---task t2v-14B \
+--task t2v-1.3B \
 --size 832*480 \
 --ckpt_dir ${model_base} \
 --dit_fsdp \
@@ -140,7 +140,7 @@ export ALGO=0
 torchrun --nproc_per_node=8 generate.py \
 --task t2v-14B \
 --size 1280*720 \
---ckpt_dir ./Wan2.1-T2V-14B \
+--ckpt_dir ${model_base} \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 8 \
@@ -157,7 +157,7 @@ export ALGO=0
 torchrun --nproc_per_node=16 generate.py \
 --task t2v-14B \
 --size 1280*720 \
---ckpt_dir ./Wan2.1-T2V-14B \
+--ckpt_dir ${model_base} \
 --dit_fsdp \
 --t5_fsdp \
 --ring_size 2 \
@@ -198,7 +198,7 @@ torchrun --nproc_per_node=8 generate.py \
 参数说明：
 - ALGO: 为0表示默认FA算子；设置为1表示使用高性能FA算子
 - task: 任务类型。
-- size: 生成视频的分辨率，支持1280*720、832*480、720*480等
+- size: 生成视频的分辨率，支持[1280, 720]、[832, 480]、[720, 480]等
 - ckpt_dir: 模型的权重路径
 - frame_num: 生成视频的帧数
 - sample_steps: 推理步数
