@@ -111,8 +111,11 @@ class xFuserLongContextAttention(LongContextAttention):
         """
 
         all_gather = False
-        # use_all_head = True
-        use_all_head = False
+        global SEQ
+        if SEQ is None:
+            use_all_head = True
+        else:
+            use_all_head = False
         # if self.args.video_size in self.video_size:
         #     all_gather = False
         # else:
