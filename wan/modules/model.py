@@ -124,7 +124,7 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, args=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -274,6 +274,8 @@ class WanAttentionBlock(nn.Module):
         # Attention_cache
         self.cache = None
 
+        self.args = None
+
     def forward(
         self,
         x,
@@ -301,7 +303,7 @@ class WanAttentionBlock(nn.Module):
         y = self.cache.apply(
             self.self_attn,
             self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes,
-            freqs)
+            freqs, self.args)
         # with amp.autocast(dtype=torch.float32):
         x = x + y * e[2]
 

@@ -354,9 +354,11 @@ def generate(args):
         if args.dit_fsdp:
             for block in transformer._fsdp_wrapped_module.blocks:
                 block._fsdp_wrapped_module.cache = cache
+                block.args = args
         else:
             for block in transformer.blocks:
                 block.cache = cache
+                block.args = args
 
         logging.info("Generating {'image' if 't2i' in args.task else 'video'} ...")
         
@@ -463,9 +465,11 @@ def generate(args):
         if args.dit_fsdp:
             for block in transformer._fsdp_wrapped_module.blocks:
                 block._fsdp_wrapped_module.cache = cache
+                block.args = args
         else:
             for block in transformer.blocks:
                 block.cache = cache
+                block.args = args
         
         logging.info(f"Warm up 2 steps...")
         video = wan_i2v.generate(

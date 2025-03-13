@@ -25,7 +25,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
     def __init__(
         self,
-        # args: Any,
+        args: Any,
         scatter_idx: int = 2,
         gather_idx: int = 1,
         ring_impl_type: str = "basic",
@@ -57,8 +57,8 @@ class xFuserLongContextAttention(LongContextAttention):
                 f"ring_impl_type: {ring_impl_type} do not support SP kv cache."
             )
         self.world_size = dist.get_world_size()
-        # self.args = args
-        self.video_size = [[720, 1280], [1280, 720], [960, 960]]
+        self.args = args
+        self.video_size = ['480*832', '832*480', '480*720', '720*480']
 
         self.algo = int(os.getenv('ALGO', 0))
         if self.algo == 1:
@@ -109,21 +109,17 @@ class xFuserLongContextAttention(LongContextAttention):
         Returns:
             * output (Tensor): context output
         """
-        if query.shape[1] < 40000:
+        if self.args.size in self.video_size:
             use_all_head = True
         else:
             use_all_head = False
 
         global SEQ
         if SEQ is None:
-            all_gather = True
-        else:
             all_gather = False
+        else:
+            all_gather = True
 
-        # if self.args.video_size in self.video_size:
-        #     all_gather = False
-        # else:
-        #     all_gather = True
         if not all_gather:
             if self.world_size == 2 or self.world_size == 4 or self.world_size == 8:
                 # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)

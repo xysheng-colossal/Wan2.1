@@ -161,6 +161,7 @@ def usp_attn_forward(self,
                      seq_lens,
                      grid_sizes,
                      freqs,
+                     args,
                      dtype=torch.bfloat16):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
@@ -179,7 +180,7 @@ def usp_attn_forward(self,
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
 
-    x = xFuserLongContextAttention()(
+    x = xFuserLongContextAttention(args)(
         None,
         query=half(q),
         key=half(k),
