@@ -12,7 +12,7 @@ except ImportError:
     raise ImportError("Please install yunchang 0.6.0 or later")
 from typing import Any
 from yunchang.comm.all_to_all import SeqAllToAll4D
-from .new_parallel import all_to_all_v1, all_to_all_v2
+from .new_parallel import all_to_all_v1, all_to_all_v2, SEQ
 
 import mindiesd
 from mindiesd.layers.flash_attn.attention_forward import attention_forward
@@ -109,13 +109,17 @@ class xFuserLongContextAttention(LongContextAttention):
         Returns:
             * output (Tensor): context output
         """
-
-        all_gather = False
-        global SEQ
-        if SEQ is None:
+        if query.shape[1] < 40000:
             use_all_head = True
         else:
             use_all_head = False
+
+        global SEQ
+        if SEQ is None:
+            all_gather = True
+        else:
+            all_gather = False
+
         # if self.args.video_size in self.video_size:
         #     all_gather = False
         # else:
