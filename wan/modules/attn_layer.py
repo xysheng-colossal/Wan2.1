@@ -70,7 +70,10 @@ class xFuserLongContextAttention(LongContextAttention):
             else:
                 raise FileNotFoundError(f"file {mindiesd_plugin_path} does not exists.")
                 
-        self.self_attention = None
+        if self.args.size in self.video_size:
+            self.use_all_head = True
+        else:
+            self.use_all_head = False
 
     def forward(
         self,
@@ -109,10 +112,6 @@ class xFuserLongContextAttention(LongContextAttention):
         Returns:
             * output (Tensor): context output
         """
-        if self.args.size in self.video_size:
-            use_all_head = True
-        else:
-            use_all_head = False
 
         global SEQ
         if SEQ is None:
@@ -157,7 +156,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 kv_full = kv_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
                 key_layer, value_layer = kv_full.chunk(2, dim=0)
 
-            if use_all_head:
+            if self.use_all_head:
                 if self.algo == 0:
                     out = attention_forward(query_layer, key_layer, value_layer,
                                             opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
