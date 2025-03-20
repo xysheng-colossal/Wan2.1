@@ -318,7 +318,7 @@ class WanI2V:
                 timestep = torch.stack(timestep).to(self.device)
 
                 if get_classifier_free_guidance_world_size() == 2:
-                    noise_pred_cond = self.model(
+                    noise_pred = self.model(
                         latent_model_input, t=timestep, **arg_all)[0].to(
                             torch.device('cpu') if offload_model else self.device)
                     noise_pred_cond, noise_pred_uncond = get_cfg_group().all_gather(
