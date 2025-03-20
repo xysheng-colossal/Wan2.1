@@ -260,10 +260,6 @@ def generate(args):
         ), f"context parallel are not supported in non-distributed environments."
 
     if args.cfg_size > 1 or args.ulysses_size > 1 or args.ring_size > 1:
-        print("world_size", world_size)
-        print("args.cfg_size", args.cfg_size)
-        print("args.ulysses_size", args.ulysses_size)
-        print("args.ring_size", args.ring_size)
         assert args.cfg_size * args.ulysses_size * args.ring_size == world_size, f"The number of cfg_size, ulysses_size and ring_size should be equal to the world size."
         sp_degree = args.ulysses_size * args.ring_size
         parallel_config = ParallelConfig(
