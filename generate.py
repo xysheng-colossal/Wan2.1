@@ -111,7 +111,7 @@ def _parse_args():
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage."
     )
     parser.add_argument(
-        "--sfg_size",
+        "--cfg_size",
         type=int,
         default=1,
         help="The size of the cfg parallelism in DiT.")
