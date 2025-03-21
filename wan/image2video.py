@@ -98,7 +98,7 @@ class WanI2V:
             device=self.device,
             dtype=self.param_dtype)
         if use_vae_parallel:
-            set_vae_patch_parallel(self.vae.model, 4, 2, decoder_decode="decoder.forward")
+            set_vae_patch_parallel(self.vae.model, 4, dist.get_world_size() // 4, decoder_decode="decoder.forward")
 
         self.clip = CLIPModel(
             dtype=config.clip_dtype,

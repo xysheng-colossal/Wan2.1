@@ -91,7 +91,7 @@ class WanT2V:
             device=self.device,
             dtype=self.param_dtype)
         if use_vae_parallel:
-            set_vae_patch_parallel(self.vae.model, 4, 2, decoder_decode="decoder.forward")
+            set_vae_patch_parallel(self.vae.model, 4, dist.get_world_size() // 4, decoder_decode="decoder.forward")
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir, torch_dtype=self.param_dtype)
