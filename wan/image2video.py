@@ -46,6 +46,7 @@ class WanI2V:
         use_usp=False,
         t5_cpu=False,
         init_on_cpu=True,
+        use_vae_parallel=False,
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -96,7 +97,8 @@ class WanI2V:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device,
             dtype=self.param_dtype)
-        set_vae_patch_parallel(self.vae.model, 4, 2, decoder_decode="decoder.forward")
+        if use_vae_parallel:
+            set_vae_patch_parallel(self.vae.model, 4, 2, decoder_decode="decoder.forward")
         self.clip = CLIPModel(
             dtype=config.clip_dtype,
             device=self.device,

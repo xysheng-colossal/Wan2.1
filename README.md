@@ -9,8 +9,8 @@
 
 ### 1.1 获取CANN&MindIE安装包&环境准备
 - 设备支持
-Atlas 800I A2(8*64G)推理设备：支持的卡数最小为1
-- [Atlas 800I A2(8*64G)](https://www.hiascend.com/developer/download/community/result?module=pt+ie+cann&product=4&model=32)
+Atlas 800I/800T A2(8*64G)推理设备：支持的卡数最小为1
+- [Atlas 800I/800T A2(8*64G)](https://www.hiascend.com/developer/download/community/result?module=pt+ie+cann&product=4&model=32)
 - [环境准备指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/80RC2alpha002/softwareinst/instg/instg_0001.html)
 
 ### 1.2 CANN安装
@@ -120,12 +120,14 @@ torchrun --nproc_per_node=4 generate.py \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 4 \
+--vae_parallel \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
 ```
 参数说明：
 - dit_fsdp: DiT使用FSDP
 - t5_fsdp: T5使用FSDP
 - ulysses_size: ulysses并行数
+- vae_parallel: 使能vae并行策略
 
 ### 3.3 Wan2.1-T2V-14B
 使用上一步下载的权重
@@ -144,11 +146,13 @@ torchrun --nproc_per_node=8 generate.py \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 8 \
+--vae_parallel \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
 ```
 参数说明：
 - ALGO: 为0表示默认FA算子；设置为1表示使用高性能FA算子
 - ulysses_size: ulysses并行数
+- vae_parallel: 使能vae并行策略
 
 ### 3.4 Wan2.1-I2V-14B
 使用上一步下载的权重
@@ -174,6 +178,7 @@ torchrun --nproc_per_node=8 generate.py \
 --dit_fsdp \
 --t5_fsdp \
 --ulysses_size 8 \
+--vae_parallel \
 --image examples/i2v_input.JPG \
 --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside."
 ```
@@ -187,6 +192,7 @@ torchrun --nproc_per_node=8 generate.py \
 - dit_fsdp: DiT使用FSDP
 - t5_fsdp: T5使用FSDP
 - ulysses_size: ulysses并行数
+- vae_parallel: 使能vae并行策略
 - image: 用于生成视频的图片路径
 - prompt: 文本提示词
 
@@ -204,6 +210,7 @@ torchrun --nproc_per_node=8 generate.py \
 --ulysses_size 4 \
 --image examples/i2v_input.JPG \
 --prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside." \
+--vae_parallel \
 --use_attentioncache \
 --start_step 12 \
 --attentioncache_interval 4 \
@@ -213,6 +220,7 @@ torchrun --nproc_per_node=8 generate.py \
 - ALGO: 为0表示默认FA算子；设置为1表示使用高性能FA算子
 - cfg_size: cfg并行数
 - ulysses_size: ulysses并行数
+- vae_parallel: 使能vae并行策略
 - use_attentioncache: 使能attentioncache策略
 - start_step: cache开始的step
 - attentioncache_interval: 连续cache数

@@ -126,6 +126,11 @@ def _parse_args():
         default=1,
         help="The size of the ring attention parallelism in DiT.")
     parser.add_argument(
+        "--vae_parallel",
+        action="store_true",
+        default=False,
+        help="Whether to use parallel for vae.")
+    parser.add_argument(
         "--t5_fsdp",
         action="store_true",
         default=False,
@@ -258,6 +263,9 @@ def generate(args):
         assert not (
             args.cfg_size > 1 or args.ulysses_size > 1 or args.ring_size > 1
         ), f"context parallel are not supported in non-distributed environments."
+        assert not (
+            args.vae_parallel
+        ), f"vae parallel are not supported in non-distributed environments."
 
     if args.cfg_size > 1 or args.ulysses_size > 1 or args.ring_size > 1:
         assert args.cfg_size * args.ulysses_size * args.ring_size == world_size, f"The number of cfg_size, ulysses_size and ring_size should be equal to the world size."
@@ -332,6 +340,7 @@ def generate(args):
             dit_fsdp=args.dit_fsdp,
             use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
             t5_cpu=args.t5_cpu,
+            use_vae_parallel=args.vae_parallel,
         )
 
         transformer = wan_t2v.model
@@ -430,6 +439,7 @@ def generate(args):
             dit_fsdp=args.dit_fsdp,
             use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
             t5_cpu=args.t5_cpu,
+            use_vae_parallel=args.vae_parallel,
         )
 
         transformer = wan_i2v.model

@@ -21,6 +21,7 @@ from .modules.vae import WanVAE
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 
 from wan.distributed.parallel_mgr import (
     get_sequence_parallel_world_size,
@@ -42,6 +43,7 @@ class WanT2V:
         dit_fsdp=False,
         use_usp=False,
         t5_cpu=False,
+        use_vae_parallel=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -88,6 +90,8 @@ class WanT2V:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device,
             dtype=self.param_dtype)
+        if use_vae_parallel:
+            set_vae_patch_parallel(self.vae.model, 4, 2, decoder_decode="decoder.forward")
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir, torch_dtype=self.param_dtype)
@@ -271,7 +275,8 @@ class WanT2V:
                 self.model.cpu()
                 torch.cuda.empty_cache()
 
-            videos = self.vae.decode(x0)
+            with VAE_patch_parallel():
+                videos = self.vae.decode(x0)
 
         del noise, latents
         del sample_scheduler
