@@ -304,7 +304,7 @@ class WanI2V:
             }
 
             arg_all = {
-                'context': [context[0]] if get_classifier_free_guidance_rank==0 else context_null,
+                'context': [context[0]] if get_classifier_free_guidance_rank()==0 else context_null,
                 'clip_fea': clip_context,
                 'seq_len': max_seq_len,
                 'y': [y],

@@ -236,7 +236,7 @@ class WanT2V:
             arg_c = {'context': context, 'seq_len': seq_len}
             arg_null = {'context': context_null, 'seq_len': seq_len}
             arg_all = {
-                'context': context if get_classifier_free_guidance_rank==0 else context_null,
+                'context': context if get_classifier_free_guidance_rank()==0 else context_null,
                 'seq_len': seq_len
             }
 
