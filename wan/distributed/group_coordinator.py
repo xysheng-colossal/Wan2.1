@@ -588,5 +588,10 @@ class SequenceParallelGroupCoordinator(GroupCoordinator):
             local_rank=local_rank,
             torch_distributed_backend=torch_distributed_backend,
         )
-        self.ulysses_world_size = self.ring_world_size = 1
-        self.ulysses_rank = self.ring_rank = 0
+        self.ulysses_group = kwargs.get("ulysses_group", None)
+        self.ulysses_world_size = torch.distributed.get_world_size(self.ulysses_group)
+        self.ulysses_rank = torch.distributed.get_rank(self.ulysses_group)
+
+        self.ring_group = kwargs.get("ring_group", None)
+        self.ring_world_size = torch.distributed.get_world_size(self.ring_group)
+        self.ring_rank = torch.distributed.get_rank(self.ring_group)

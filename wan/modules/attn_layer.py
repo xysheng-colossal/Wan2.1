@@ -11,11 +11,12 @@ try:
 except ImportError:
     raise ImportError("Please install yunchang 0.6.0 or later")
 from typing import Any
-from yunchang.comm.all_to_all import SeqAllToAll4D
-# from .new_parallel import all_to_all_v1, all_to_all_v2, SEQ
 
 import mindiesd
 from mindiesd.layers.flash_attn.attention_forward import attention_forward
+
+from ..distributed.parallel_mgr import get_sp_group
+from ..distributed.comm import all_to_all_4D
 
 logger = logging.getLogger(__name__)
 MAX_TOKEN = 2147483647
@@ -74,6 +75,9 @@ class xFuserLongContextAttention(LongContextAttention):
             self.use_all_head = True
         else:
             self.use_all_head = False
+        
+        self.ulysses_pg = get_sp_group().ulysses_group
+        self.ring_pg = get_sp_group().ring_group
 
     def forward(
         self,
@@ -113,40 +117,20 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
 
-        # if self.world_size == 2 or self.world_size == 4 or self.world_size == 8:
-            # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
-            # scatter 2, gather 1
-        if self.use_pack_qkv:
-            qkv = torch.cat([query, key, value]).contiguous()
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
-            query_layer, key_layer, value_layer = torch.chunk(qkv, 3, dim=0)
-        else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
-        # elif self.world_size == 16:
-        #     # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
-        #     # scatter 2, gather 1
-        #     query_layer = SeqAllToAll4D.apply(
-        #         self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-        #     )
-        #     key_value_layer = SeqAllToAll4D.apply(
-        #         self.ulysses_pg, torch.cat((key, value), dim=0), self.scatter_idx, self.gather_idx
-        #     )
+        query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+        key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+        value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
 
-        #     b, s, n, d = key_value_layer.shape
-        #     kv_full = torch.empty([2, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
-        #     dist.all_gather_into_tensor(kv_full, key_value_layer, group=self.ring_pg)
-        #     kv_full = kv_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
-        #     key_layer, value_layer = kv_full.chunk(2, dim=0)
+        if get_sp_group().ring_world_size == 2:
+            b, s, n, d = key_layer.shape
+            k_full = torch.empty([2, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            dist.all_gather_into_tensor(k_full, key_layer, group=self.ring_pg)
+            key_layer = k_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+
+            v_full = torch.empty([2, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            dist.all_gather_into_tensor(v_full, value_layer, group=self.ring_pg)
+            value_layer = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+
 
         if self.use_all_head:
             if self.algo == 0:
@@ -183,8 +167,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
+        output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
+
         return output
 
