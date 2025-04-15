@@ -260,7 +260,7 @@ class WanI2V:
                             0, 1),
                         torch.zeros(3, F - 1, h, w, device = self.device)],
                      dim=1)
-        if self.rank() < 8:
+        if self.rank < 8:
             with VAE_patch_parallel():
                 y = self.vae.encode([
                     encode_input
