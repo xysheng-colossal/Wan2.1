@@ -91,7 +91,7 @@ class WanT2V:
             device=self.device,
             dtype=self.param_dtype)
         if use_vae_parallel:
-            set_vae_patch_parallel(self.vae.model, 4, dist.get_world_size() // 4, decoder_decode="decoder.forward")
+            set_vae_patch_parallel(self.vae.model, 4, 8 // 4, decoder_decode="decoder.forward")
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir, torch_dtype=self.param_dtype)
@@ -275,8 +275,9 @@ class WanT2V:
                 self.model.cpu()
                 torch.cuda.empty_cache()
 
-            with VAE_patch_parallel():
-                videos = self.vae.decode(x0)
+            if self.rank < 8:
+                with VAE_patch_parallel():
+                    videos = self.vae.decode(x0)
 
         del noise, latents
         del sample_scheduler
@@ -286,4 +287,5 @@ class WanT2V:
         if dist.is_initialized():
             dist.barrier()
 
-        return videos[0]
+        return videos[0] if self.rank == 0 else None
+
