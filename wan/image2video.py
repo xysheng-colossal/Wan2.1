@@ -266,13 +266,14 @@ class WanI2V:
                     encode_input
                 ])[0]
             if dist.get_world_size() > 8:
-                target_rank = self.rank + 8
-                torch.npu.synchronize()
                 shape_tensor = torch.tensor(y.shape, dtype=torch.int64, device=self.device)
-                dist.send(shape_tensor, dst=target_rank)
-                dist.send(y, dst=target_rank)
+                for i in range(dist.get_world_size() // 8 - 1):
+                    target_rank = self.rank + 8 * (i + 1)
+                    torch.npu.synchronize()
+                    dist.send(shape_tensor, dst=target_rank)
+                    dist.send(y, dst=target_rank)
         else:
-            source_rank = self.rank - 8
+            source_rank = self.rank % 8
             shape_tensor = torch.zeros((4, ), dtype=torch.int64, device=self.device)
             dist.recv(shape_tensor, src=source_rank)
             shape = shape_tensor.tolist()
