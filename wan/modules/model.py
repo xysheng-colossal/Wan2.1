@@ -2,6 +2,7 @@
 import math
 
 import torch
+import torch_npu
 import torch.cuda.amp as amp
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -80,7 +81,8 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return self._norm(x.float()).type_as(x) * self.weight
+        # return self._norm(x.float()).type_as(x) * self.weight
+        return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.eps)[0]
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
@@ -90,13 +92,34 @@ class WanLayerNorm(nn.LayerNorm):
 
     def __init__(self, dim, eps=1e-6, elementwise_affine=False):
         super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
+        self.dim = dim
 
     def forward(self, x):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return super().forward(x.float()).type_as(x)
+        # return super().forward(x.float()).type_as(x)
+        return torch_npu.npu_layer_norm_eval(
+            x, normalized_shape=[self.dim], weight=self.weight, bias=self.bias, eps=self.eps,
+        )
+
+
+class WanLayerNormModulate(nn.LayerNorm):
+
+    def __init__(self, dim, eps=1e-6, elementwise_affine=False):
+        super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
+        self.dim = dim
+
+    def forward(self, x, weight, scale):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L, C]
+        """
+        # return super().forward(x.float()).type_as(x)
+        return torch_npu.npu_layer_norm_eval(
+            x, normalized_shape=[self.dim], weight=weight, bias=scale, eps=self.eps,
+        )
 
 
 class WanSelfAttention(nn.Module):
@@ -252,7 +275,8 @@ class WanAttentionBlock(nn.Module):
         self.eps = eps
 
         # layers
-        self.norm1 = WanLayerNorm(dim, eps)
+        # self.norm1 = WanLayerNorm(dim, eps)
+        self.norm1 = WanLayerNormModulate(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
                                           eps)
         self.norm3 = WanLayerNorm(
@@ -263,7 +287,9 @@ class WanAttentionBlock(nn.Module):
                                                                       (-1, -1),
                                                                       qk_norm,
                                                                       eps)
-        self.norm2 = WanLayerNorm(dim, eps)
+        # self.norm2 = WanLayerNorm(dim, eps)
+        self.norm2 = WanLayerNormModulate(dim, eps)
+
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
             nn.Linear(ffn_dim, dim))
@@ -275,6 +301,7 @@ class WanAttentionBlock(nn.Module):
         self.cache = None
 
         self.args = None
+
 
     def forward(
         self,
@@ -302,7 +329,10 @@ class WanAttentionBlock(nn.Module):
         # self-attention
         y = self.cache.apply(
             self.self_attn,
-            self.norm1(x).float() * (1 + e[1]) + e[0], seq_lens, grid_sizes,
+            self.norm1(x, 1 + e[1], e[0]), 
+            # self.norm1(x).float() * (1 + e[1]) + e[0], 
+            seq_lens, 
+            grid_sizes,
             freqs, self.args)
         # with amp.autocast(dtype=torch.float32):
         x = x + y * e[2]
@@ -310,7 +340,8 @@ class WanAttentionBlock(nn.Module):
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
-            y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
+            y = self.ffn(self.norm2(x, 1 + e[4], e[3]))
+            # y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
             # with amp.autocast(dtype=torch.float32):
             x = x + y * e[5]
             return x

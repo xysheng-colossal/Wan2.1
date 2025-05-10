@@ -62,15 +62,7 @@ class xFuserLongContextAttention(LongContextAttention):
         self.video_size = ['480*832', '832*480', '480*720', '720*480']
 
         self.algo = int(os.getenv('ALGO', 0))
-        if self.algo == 1:
-            
-            mindiesd_plugin_path = os.path.join(mindiesd.__path__[0], 'plugin/libPTAExtensionOPS.so')
 
-            if os.path.exists(mindiesd_plugin_path):
-                torch.ops.load_library(mindiesd_plugin_path)
-            else:
-                raise FileNotFoundError(f"file {mindiesd_plugin_path} does not exists.")
-                
         if self.args.size in self.video_size:
             self.use_all_head = True
         else:
@@ -141,7 +133,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 out = attention_forward(query_layer, key_layer, value_layer,
                                         opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
             else:
-                raise ValueError(f"select flash attention algorithm only support 0, 1, but got f{self.algo}")
+                raise ValueError(f"select flash attention algorithm only support 0, 1, but got {self.algo}")
         else:
             query_layer_list = query_layer.split(1, dim=2)
             key_layer_list = key_layer.split(1, dim=2)

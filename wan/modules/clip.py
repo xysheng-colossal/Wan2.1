@@ -4,6 +4,7 @@ import logging
 import math
 
 import torch
+import torch_npu
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
@@ -47,7 +48,10 @@ class QuickGELU(nn.Module):
 class LayerNorm(nn.LayerNorm):
 
     def forward(self, x):
-        return super().forward(x.float()).type_as(x)
+        # return super().forward(x.float()).type_as(x)
+        return torch_npu.npu_layer_norm_eval(
+            x, normalized_shape=[self.normalized_shape], weight=self.weight, bias=self.bias, eps=self.eps,
+        )
 
 
 class SelfAttention(nn.Module):
