@@ -194,7 +194,6 @@ torchrun --nproc_per_node=8 generate.py \
 --ulysses_size 8 \
 --vae_parallel \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
---vae_parallel \
 --use_attentioncache \
 --start_step 20 \
 --attentioncache_interval 3 \
