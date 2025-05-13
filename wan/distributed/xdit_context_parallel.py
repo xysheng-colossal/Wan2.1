@@ -142,7 +142,7 @@ def usp_dit_forward(
         e=e0,
         seq_lens=seq_lens,
         grid_sizes=grid_sizes,
-        freqs=freqs_list,
+        freqs=self.freqs_list,
         context=context,
         context_lens=context_lens)
 
