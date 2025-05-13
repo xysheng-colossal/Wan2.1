@@ -277,7 +277,7 @@ torchrun --nproc_per_node=8 generate.py \
 --use_attentioncache \
 --start_step 12 \
 --attentioncache_interval 4 \
---end_step 27
+--end_step 37
 ```
 参数说明：
 - ALGO: 为0表示默认FA算子；设置为1表示使用高性能FA算子
