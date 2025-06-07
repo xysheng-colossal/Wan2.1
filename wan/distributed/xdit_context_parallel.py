@@ -128,8 +128,8 @@ def usp_dit_forward(
             freqs_i_rank = freqs_i[(sp_rank * s_per_rank):((sp_rank + 1) *
                                                         s_per_rank), :, :]
             cos, sin = torch.chunk(torch.view_as_real(freqs_i_rank.to(torch.complex64)), 2, dim=-1)
-            cos = cos.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
-            sin = sin.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
+            cos = cos.unsqueeze(0).expand(-1, -1, -1, -1, 2).flatten(-2)
+            sin = sin.unsqueeze(0).expand(-1, -1, -1, -1, 2).flatten(-2)
             freqs_i_rank = (cos, sin)
             freqs_list.append(freqs_i_rank)
         self.freqs_list = freqs_list
