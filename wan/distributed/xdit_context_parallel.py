@@ -9,6 +9,7 @@ from ..modules.attn_layer import xFuserLongContextAttention
 
 from ..modules.model import sinusoidal_embedding_1d
 
+from mindiesd import rotary_position_embedding
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -33,22 +34,14 @@ def rope_apply(x, grid_sizes, freqs_list):
     grid_sizes: [B, 3].
     freqs:      [M, C // 2].
     """
-    s, n, c = x.size(1), x.size(2), x.size(3) // 2
-
-    # loop over samples
+    s, n, c = x.size(1), x.size(2), x.size(3)
     output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :s].to(torch.float32).reshape(
-            s, n, -1, 2))
-        freqs_i_rank = freqs_list[i]
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i_rank).flatten(2)
-        x_i = torch.cat([x_i, x[i, s:]])
-
-        # append to collection
+        x_i = x[i, :s].reshape(1, s, n, c)
+        cos, sin = freqs_list[i]
+        x_i = rotary_position_embedding(x_i, cos, sin, rotated_mode="rotated_interleaved", fused=True)
         output.append(x_i)
-    return torch.stack(output).float()
+    return torch.cat(output).float()
 
 
 def usp_dit_forward(
@@ -134,6 +127,10 @@ def usp_dit_forward(
             s_per_rank = s
             freqs_i_rank = freqs_i[(sp_rank * s_per_rank):((sp_rank + 1) *
                                                         s_per_rank), :, :]
+            cos, sin = torch.chunk(torch.view_as_real(freqs_i_rank.to(torch.complex64)), 2, dim=-1)
+            cos = cos.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
+            sin = sin.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
+            freqs_i_rank = (cos, sin)
             freqs_list.append(freqs_i_rank)
         self.freqs_list = freqs_list
 

@@ -2,6 +2,8 @@
 import torch
 import torch_npu
 
+from mindiesd import attention_forward
+
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
@@ -153,15 +155,13 @@ def attention(
         q = q.to(torch.bfloat16)
         k = k.to(torch.bfloat16)
         v = v.to(torch.bfloat16)
-        scale = q.shape[-1] ** -0.5
-        return torch_npu.npu_prompt_flash_attention(
-            q, k, v,
-            num_heads=q.shape[2],
-            input_layout="BSND",
-            scale_value=scale,
-            pre_tokens=MAX_TOKEN,
-            next_tokens=MAX_TOKEN
-        ).to(qtype)
+        if q.shape[1] == k.shape[1] and int(os.getenv('ALGO', 0)) == 1:
+            out = attention_forward(q, k, v,
+                                opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
+        else:
+            out = attention_forward(q, k, v,
+                                opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
+        return out.to(qtype)
     elif FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         return flash_attention(
             q=q,

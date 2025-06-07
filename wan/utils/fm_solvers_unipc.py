@@ -458,8 +458,10 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             if order == 2:
                 rhos_p = torch.tensor([0.5], dtype=x.dtype, device=device)
             else:
-                rhos_p = torch.linalg.solve(R[:-1, :-1],
-                                            b[:-1]).to(device).to(x.dtype)
+                R_inv = torch.inverse(R[:-1, :-1])
+                rhos_p = torch.matmul(R_inv, b[:-1]).to(device).to(x.dtype)
+                # rhos_p = torch.linalg.solve(R[:-1, :-1],
+                #                             b[:-1]).to(device).to(x.dtype)
         else:
             D1s = None
 
@@ -604,7 +606,9 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         if order == 1:
             rhos_c = torch.tensor([0.5], dtype=x.dtype, device=device)
         else:
-            rhos_c = torch.linalg.solve(R, b).to(device).to(x.dtype)
+            R_inv = torch.inverse(R)
+            rhos_c = torch.matmul(R_inv, b).to(device).to(x.dtype)
+            # rhos_c = torch.linalg.solve(R, b).to(device).to(x.dtype)
 
         if self.predict_x0:
             x_t_ = sigma_t / sigma_s0 * x - alpha_t * h_phi_1 * m0

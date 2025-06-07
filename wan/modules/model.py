@@ -10,6 +10,8 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention, attention
 
+from mindiesd import rotary_position_embedding
+
 __all__ = ['WanModel']
 
 
@@ -38,34 +40,20 @@ def rope_params(max_seq_len, dim, theta=10000):
 
 
 @amp.autocast(enabled=False)
-def rope_apply(x, grid_sizes, freqs):
-    n, c = x.size(2), x.size(3) // 2
-
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
-    # loop over samples
+def rope_apply(x, grid_sizes, freqs_list):
+    """
+    x:          [B, L, N, C].
+    grid_sizes: [B, 3].
+    freqs:      [M, C // 2].
+    """
+    s, n, c = x.size(1), x.size(2), x.size(3)
     output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
-
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
-            seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
-
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
+        x_i = x[i, :s].reshape(1, s, n, c)
+        cos, sin = freqs_list[i]
+        x_i = rotary_position_embedding(x_i, cos, sin, rotated_mode="rotated_interleaved", fused=True)
         output.append(x_i)
-    return torch.stack(output).float()
+    return torch.cat(output).float()
 
 
 class WanRMSNorm(nn.Module):
@@ -590,12 +578,35 @@ class WanModel(ModelMixin, ConfigMixin):
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
 
+        if self.freqs_list is None:
+            c = (self.dim // self.num_heads) // 2
+            s = x.shape[1]
+            freqs = self.freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+            freqs_list=[]
+
+            for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+                seq_len = f * h * w
+
+                freqs_i = torch.cat([
+                    freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                    freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                    freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+                ],
+                                    dim=-1).reshape(seq_len, 1, -1)
+
+                cos, sin = torch.chunk(torch.view_as_real(freqs_i.to(torch.complex64)), 2, dim=-1)
+                cos = cos.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
+                sin = sin.unsqueeze(0).expend(-1, -1, -1, -1, 2).flatten(-2)
+                freqs_i = (cos, sin)
+                freqs_list.append(freqs_i)
+            self.freqs_list = freqs_list
+
         # arguments
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
             grid_sizes=grid_sizes,
-            freqs=self.freqs,
+            freqs=self.freqs_list,
             context=context,
             context_lens=context_lens)
 
