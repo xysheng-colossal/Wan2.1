@@ -132,9 +132,9 @@ class WanI2V:
             dist.barrier()
         if dit_fsdp:
             self.model = shard_fn(self.model)
-        else:
-            if not init_on_cpu:
-                self.model.to(self.device)
+        # else:
+        #     if not init_on_cpu:
+        #         self.model.to(self.device)
 
         self.sample_neg_prompt = config.sample_neg_prompt
 

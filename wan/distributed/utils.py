@@ -83,19 +83,22 @@ def generate_masked_orthogonal_rank_groups(
 class RankGenerator(object):
     def __init__(
         self,
+        tp: int,
         sp: int,
         cfg: int,
         order: str,
         rank_offset: int = 0,
     ) -> None:
+        self.tp = tp
         self.sp = sp
         self.cfg = cfg
         self.rank_offset = rank_offset
-        self.world_size = sp * cfg
+        self.world_size = tp * sp * cfg
 
         self.name_to_size = {
             "sp": self.sp,
             "cfg": self.cfg,
+            "tp": self.tp,
         }
         order = order.lower()
 

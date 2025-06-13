@@ -234,7 +234,7 @@ torchrun --nproc_per_node=8 generate.py \
 执行命令：
 ```shell
 export ALGO=0
-torchrun --nproc_per_node=8 generate.py \
+torchrun --nproc_per_node=16 generate.py \
 --task t2v-14B \
 --size 1280*720 \
 --ckpt_dir ${model_base} \

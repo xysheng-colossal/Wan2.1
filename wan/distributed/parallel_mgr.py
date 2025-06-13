@@ -11,12 +11,14 @@ from yunchang import set_seq_parallel_pg
 from yunchang.globals import PROCESS_GROUP
 
 _WORLD: Optional[GroupCoordinator] = None
+_TP: Optional[GroupCoordinator] = None
 _SP: Optional[SequenceParallelGroupCoordinator] = None
 _CFG: Optional[GroupCoordinator] = None
 
 
 @dataclass
 class ParallelConfig:
+    tp_degree: int = 1
     sp_degree: int = 1
     ulysses_degree: int = 1
     ring_degree: int = 1
@@ -28,13 +30,13 @@ class ParallelConfig:
             self.cfg_degree = 2
         else:
             self.cfg_degree = 1
-        if not self.sp_degree * self.cfg_degree <= self.world_size:
+        if not self.tp_degree * self.sp_degree * self.cfg_degree <= self.world_size:
             logging.error(
-                "sp_degree * cfg_degree must be less than or equal to "
+                "tp_degree * sp_degree * cfg_degree must be less than or equal to "
                 "world_size because of classifier free guidance"
             )
-        if not (self.world_size % (self.sp_degree * self.cfg_degree) == 0):
-            logging.error("world_size must be divisible by sp_degree * cfg_degree")
+        if not (self.world_size % (self.tp_degree * self.sp_degree * self.cfg_degree) == 0):
+            logging.error("world_size must be divisible by tp_degree * sp_degree * cfg_degree")
 
 
 # * QUERY
@@ -42,6 +44,22 @@ def get_world_group() -> GroupCoordinator:
     if _WORLD is None:
         logging.error("world group is not initialized")
     return _WORLD
+
+
+# TP
+def get_tp_group() -> GroupCoordinator:
+    assert _TP is not None, "tensor model parallel group is not initialized"
+    return _TP
+
+
+def get_tensor_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_tp_group().world_size
+
+
+def get_tensor_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_tp_group().rank_in_group
 
 
 # SP
@@ -159,6 +177,7 @@ def model_parallel_is_initialized():
     return (
         _CFG is not None
         and _SP is not None
+        and _TP is not None
     )
 
 
@@ -170,6 +189,7 @@ def init_model_parallel_group(
     **kwargs,
 ) -> GroupCoordinator:
     if parallel_mode not in [
+        "tensor",
         "sequence",
         "classifier_free_guidance",
     ]:
@@ -194,6 +214,7 @@ def initialize_model_parallel(
     sequence_parallel_degree: int = 1,
     ulysses_degree: int = 1,
     ring_degree: int = 1,
+    tensor_parallel_degree: int = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -202,6 +223,7 @@ def initialize_model_parallel(
     Arguments:
         classifier_free_guidance_degree: number of GPUs used for Classifier Free Guidance (CFG)
         sequence_parallel_degree: number of GPUs used for sequence parallelism.
+        tensor_parallel_degree: number of GPUs used for tensor parallelism.
         backend: distributed backend of pytorch collective comm.
     """
     # Get world size and rank. Ensure some consistencies.
@@ -214,18 +236,22 @@ def initialize_model_parallel(
         world_size
         != classifier_free_guidance_degree
         * sequence_parallel_degree
+        * tensor_parallel_degree
     ):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
-            f"sequence_parallel_degree ({sequence_parallel_degree}) x"
+            f"sequence_parallel_degree ({sequence_parallel_degree}) x "
             f"classifier_free_guidance_degree "
-            f"({classifier_free_guidance_degree}) x"
+            f"({classifier_free_guidance_degree}) x "
+            f"tensor_parallel_degree "
+            f"({tensor_parallel_degree})"
         )
     
     rank_generator: RankGenerator = RankGenerator(
+        tensor_parallel_degree,
         sequence_parallel_degree,
         classifier_free_guidance_degree,
-        "sp-cfg",
+        "tp-sp-cfg",
     )
     
     global _CFG
@@ -256,6 +282,15 @@ def initialize_model_parallel(
             ring_group=PROCESS_GROUP.RING_PG,
         )
 
+    global _TP
+    assert _TP is None, "Tensor parallel group is already initialized"
+    _TP = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("tp"),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="tensor",
+    )
+
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
@@ -268,6 +303,11 @@ def destroy_model_parallel():
     if _SP:
         _SP.destroy()
     _SP = None
+
+    global _TP
+    if _TP:
+        _TP.destroy()
+    _TP = None
 
 
 def destroy_distributed_environment():
@@ -292,6 +332,7 @@ def init_parallel_env(parallel_config: ParallelConfig):
         sequence_parallel_degree=parallel_config.sp_degree,
         ulysses_degree=parallel_config.ulysses_degree,
         ring_degree=parallel_config.ring_degree,
+        tensor_parallel_degree=parallel_config.tp_degree,
     )
 
 

@@ -116,7 +116,7 @@ class WanT2V:
         if dit_fsdp:
             self.model = shard_fn(self.model)
         else:
-            self.model.to(self.device)
+            self.model.to(torch.device('cpu'))
 
         self.sample_neg_prompt = config.sample_neg_prompt
 

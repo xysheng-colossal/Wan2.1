@@ -22,6 +22,7 @@ from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, MAX_AREA_CONFIGS, SUPPORTED_S
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import cache_video, cache_image, str2bool
 from wan.distributed.parallel_mgr import ParallelConfig, init_parallel_env, finalize_parallel_env
+from wan.distributed.tp_applicator import TensorParallelApplicator
 
 from mindiesd import CacheConfig, CacheAgent
 
@@ -125,6 +126,11 @@ def _parse_args():
         type=int,
         default=1,
         help="The size of the ring attention parallelism in DiT.")
+    parser.add_argument(
+        "--tp_size",
+        type=int,
+        default=1,
+        help="The size of the tensor parallelism in DiT.")
     parser.add_argument(
         "--vae_parallel",
         action="store_true",
@@ -267,17 +273,22 @@ def generate(args):
             args.vae_parallel
         ), f"vae parallel are not supported in non-distributed environments."
 
-    if args.cfg_size > 1 or args.ulysses_size > 1 or args.ring_size > 1:
-        assert args.cfg_size * args.ulysses_size * args.ring_size == world_size, f"The number of cfg_size, ulysses_size and ring_size should be equal to the world size."
+    if args.cfg_size > 1 or args.ulysses_size > 1 or args.ring_size > 1 or args.tp_size > 1:
+        assert args.cfg_size * args.ulysses_size * args.ring_size * args.tp_size == world_size, f"The number of cfg_size, ulysses_size and ring_size should be equal to the world size."
         sp_degree = args.ulysses_size * args.ring_size
         parallel_config = ParallelConfig(
             sp_degree=sp_degree,
             ulysses_degree=args.ulysses_size,
             ring_degree=args.ring_size,
+            tp_degree=args.tp_size,
             use_cfg_parallel=(args.cfg_size==2),
             world_size=world_size,
         )
         init_parallel_env(parallel_config)
+
+    if args.tp_size > 1 and args.dit_fsdp:
+        logging.info("DiT using Tensor Parallel, disabled dit_fsdp")
+        args.dit_fsdp = False
 
     if args.use_prompt_extend:
         if args.prompt_extend_method == "dashscope":
@@ -344,6 +355,12 @@ def generate(args):
         )
 
         transformer = wan_t2v.model
+        if args.tp_size > 1:
+            logging.info("Initializing tensor parallel...")
+            applicator = TensorParallelApplicator(args.tp_size, device_map="cpu")
+            applicator.apply_to_model(transformer)
+        wan_t2v.model.to("npu")
+
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
@@ -443,6 +460,12 @@ def generate(args):
         )
 
         transformer = wan_i2v.model
+        if args.tp_size > 1:
+            logging.info("Initting tensor parallel...")
+            applicator = TensorParallelApplicator(args.tp_size, device_map="cpu")
+            applicator.apply_to_model(transformer)
+        wan_i2v.model.to("npu")
+
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
@@ -506,7 +529,7 @@ def generate(args):
             formatted_prompt = args.prompt.replace(" ", "_").replace("/",
                                                                      "_")[:50]
             suffix = '.png' if "t2i" in args.task else '.mp4'
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.cfg_size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}" + suffix
+            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.cfg_size}_{args.ulysses_size}_{args.ring_size}_{args.tp_size}_{formatted_prompt}_{formatted_time}" + suffix
 
         if "t2i" in args.task:
             logging.info(f"Saving generated image to {args.save_file}")
