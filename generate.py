@@ -211,10 +211,22 @@ def _parse_args():
         type=float,
         default=5.0,
         help="Classifier free guidance scale.")
+    parser.add_argument(
+        "--quant_desc_path",
+        type=str,
+        help="Path to quantization description file (enables quantization if provided, format: quant_model_description_*.json)"
+    )
+    
     parser = add_attentioncache_args(parser)
     args = parser.parse_args()
 
     _validate_args(args)
+
+    # Validate quantization file existence if path is provided
+    if args.quant_desc_path:
+        if not os.path.exists(args.quant_desc_path):
+            raise FileNotFoundError(f"Quantization description file not found: {args.quant_desc_path}")
+        logging.info(f"Quantization enabled. Using description file: {args.quant_desc_path}")
 
     return args
 
@@ -361,6 +373,20 @@ def generate(args):
             applicator.apply_to_model(transformer)
         wan_t2v.model.to("npu")
 
+        # Apply quantization if description file is provided
+        if args.quant_desc_path:
+            # Import quantization module only when needed to reduce dependencies
+            from mindiesd import quantize
+            # Apply quantization
+            quantize(
+                model=transformer,
+                quant_des_path=args.quant_desc_path,
+                use_nz=True
+            )
+            # Ensure quantized model is on the correct device
+            transformer = transformer.to(device)
+            logging.info("Quantization applied successfully")
+
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
@@ -465,6 +491,20 @@ def generate(args):
             applicator = TensorParallelApplicator(args.tp_size, device_map="cpu")
             applicator.apply_to_model(transformer)
         wan_i2v.model.to("npu")
+
+        # Apply quantization if description file is provided
+        if args.quant_desc_path:
+            # Import quantization module only when needed to reduce dependencies
+            from mindiesd import quantize
+            # Apply quantization
+            quantize(
+                model=transformer,
+                quant_des_path=args.quant_desc_path,
+                use_nz=True
+            )
+            # Ensure quantized model is on the correct device
+            transformer = transformer.to(device)
+            logging.info("Quantization applied successfully")
 
         if args.use_attentioncache:
             config = CacheConfig(
