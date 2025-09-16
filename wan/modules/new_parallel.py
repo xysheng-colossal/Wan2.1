@@ -16,7 +16,7 @@
 import torch
 import torch_npu
 import torch.distributed as dist
-from mindiesd.layers.flash_attn.attention_forward import attention_forward
+from mindiesd import attention_forward
 
 
 MAX_TOKEN = 2147483647

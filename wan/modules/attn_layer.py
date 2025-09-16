@@ -12,7 +12,7 @@ except ImportError:
     raise ImportError("Please install yunchang 0.6.0 or later")
 from typing import Any
 
-from mindiesd.layers.flash_attn.attention_forward import attention_forward
+from mindiesd import attention_forward
 
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
