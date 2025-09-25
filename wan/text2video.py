@@ -78,7 +78,7 @@ class WanT2V:
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
-            device=torch.device('cpu') if os.getenv('T5_LOAD_CPU', 1) else self.device,
+            device=torch.device('cpu') if int(os.getenv('T5_LOAD_CPU', 0)) else self.device,
             checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
             shard_fn=shard_fn if t5_fsdp else None)
