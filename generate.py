@@ -222,12 +222,6 @@ def _parse_args():
 
     _validate_args(args)
 
-    # Validate quantization file existence if path is provided
-    if args.quant_desc_path:
-        if not os.path.exists(args.quant_desc_path):
-            raise FileNotFoundError(f"Quantization description file not found: {args.quant_desc_path}")
-        logging.info(f"Quantization enabled. Using description file: {args.quant_desc_path}")
-
     return args
 
 
