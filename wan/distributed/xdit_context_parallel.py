@@ -41,7 +41,7 @@ def rope_apply(x, grid_sizes, freqs_list):
         cos, sin = freqs_list[i]
         x_i = rotary_position_embedding(x_i, cos, sin, rotated_mode="rotated_interleaved", fused=True)
         output.append(x_i)
-    return torch.cat(output).float()
+    return torch.cat(output)
 
 
 def usp_dit_forward(

@@ -48,8 +48,7 @@ class QuickGELU(nn.Module):
 class LayerNorm(nn.LayerNorm):
 
     def forward(self, x):
-        # return super().forward(x.float()).type_as(x)
-        return torch_npu.npu_layer_norm_eval(
+        return torch.nn.functional.layer_norm(
             x, normalized_shape=[self.normalized_shape[0]], weight=self.weight, bias=self.bias, eps=self.eps,
         )
 

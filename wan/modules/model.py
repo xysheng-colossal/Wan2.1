@@ -53,7 +53,7 @@ def rope_apply(x, grid_sizes, freqs_list):
         cos, sin = freqs_list[i]
         x_i = rotary_position_embedding(x_i, cos, sin, rotated_mode="rotated_interleaved", fused=True)
         output.append(x_i)
-    return torch.cat(output).float()
+    return torch.cat(output)
 
 
 class WanRMSNorm(nn.Module):
@@ -87,8 +87,7 @@ class WanLayerNorm(nn.LayerNorm):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        # return super().forward(x.float()).type_as(x)
-        return torch_npu.npu_layer_norm_eval(
+        return torch.nn.functional.layer_norm(
             x, normalized_shape=[self.dim], weight=self.weight, bias=self.bias, eps=self.eps,
         )
 
@@ -104,7 +103,6 @@ class WanLayerNormModulate(nn.LayerNorm):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        # return super().forward(x.float()).type_as(x)
         return torch_npu.npu_layer_norm_eval(
             x, normalized_shape=[self.dim], weight=weight, bias=scale, eps=self.eps,
         )
@@ -318,7 +316,7 @@ class WanAttentionBlock(nn.Module):
         y = self.cache.apply(
             self.self_attn,
             self.norm1(x, 1 + e[1], e[0]), 
-            # self.norm1(x).float() * (1 + e[1]) + e[0], 
+            # self.norm1(x) * (1 + e[1]) + e[0], 
             seq_lens, 
             grid_sizes,
             freqs, self.args)
@@ -329,7 +327,7 @@ class WanAttentionBlock(nn.Module):
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             y = self.ffn(self.norm2(x, 1 + e[4], e[3]))
-            # y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
+            # y = self.ffn(self.norm2(x) * (1 + e[4]) + e[3])
             # with amp.autocast(dtype=torch.float32):
             x = x + y * e[5]
             return x

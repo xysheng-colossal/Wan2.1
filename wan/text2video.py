@@ -44,6 +44,7 @@ class WanT2V:
         use_usp=False,
         t5_cpu=False,
         use_vae_parallel=False,
+        quant_dit_path=None,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -102,6 +103,19 @@ class WanT2V:
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.model = WanModel.from_pretrained(checkpoint_dir, torch_dtype=self.param_dtype)
+        if quant_dit_path:
+            quant_dit_path = os.path.abspath(quant_dit_path)
+            quant_dit_desc_path = os.path.join(quant_dit_path, "quant_model_description_w8a8_dynamic.json")
+            if not os.path.exists(quant_dit_desc_path):
+                raise FileNotFoundError(f"Quantization description file not found: {quant_dit_desc_path}")
+            logging.info(f"Enabled quant, trying to load quantized DiT model from {quant_dit_path}...")
+            from mindiesd import quantize
+            quantize(
+                model=self.model,
+                quant_des_path=quant_dit_desc_path,
+                use_nz=True
+            )
+            logging.info("Load quantized DiT model successfully")
         self.model.eval().requires_grad_(False)
 
         if use_usp:
