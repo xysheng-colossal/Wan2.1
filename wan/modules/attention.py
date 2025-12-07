@@ -3,6 +3,7 @@ import torch
 import torch_npu
 import os
 
+from wan.utils.rainfusion import Rainfusion
 from mindiesd import attention_forward
 
 try:
@@ -150,6 +151,8 @@ def attention(
     deterministic=False,
     dtype=torch.bfloat16,
     version=None,
+    rainfusion_config=None,
+    t_idx=None
 ):
     if torch.npu.is_available():
         qtype = q.dtype
@@ -157,8 +160,21 @@ def attention(
         k = k.to(torch.bfloat16)
         v = v.to(torch.bfloat16)
         if version is None and q.shape[1] == k.shape[1] and int(os.getenv('ALGO', 0)) == 1:
-            out = attention_forward(q, k, v,
-                                opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
+            if rainfusion_config is not None:
+                rainfusion_fa = Rainfusion(
+                    grid_size=rainfusion_config["grid_size"],
+                    skip_timesteps=rainfusion_config["skip_timesteps"],
+                    sparsity=rainfusion_config["sparsity"],
+                )
+                out = rainfusion_fa(
+                    q, k, v,
+                    atten_mask_all=rainfusion_config["atten_mask_all"],
+                    text_len=0,
+                    t_idx=t_idx,
+                )
+            else:
+                out = attention_forward(q, k, v,
+                                    opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
         else:
             out = attention_forward(q, k, v,
                                 opt_mode="manual", op_type="fused_attn_score", layout="BNSD")

@@ -12,10 +12,11 @@ except ImportError:
     raise ImportError("Please install yunchang 0.6.0 or later")
 from typing import Any
 
-from mindiesd import attention_forward
-
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
+from wan.utils.rainfusion import Rainfusion
+
+from mindiesd import attention_forward
 
 logger = logging.getLogger(__name__)
 MAX_TOKEN = 2147483647
@@ -32,6 +33,7 @@ class xFuserLongContextAttention(LongContextAttention):
         use_pack_qkv: bool = False,
         use_kv_cache: bool = False,
         attn_type: AttnType = AttnType.FA,
+        rainfusion_config=None,
     ) -> None:
         """
         Arguments:
@@ -70,6 +72,15 @@ class xFuserLongContextAttention(LongContextAttention):
         self.ulysses_pg = get_sp_group().ulysses_group
         self.ring_pg = get_sp_group().ring_group
 
+        self.rainfusion_config = rainfusion_config
+        self.rainfusion_fa = None
+        if self.rainfusion_config is not None:
+            self.rainfusion_fa = Rainfusion(
+                grid_size=rainfusion_config["grid_size"],
+                skip_timesteps=rainfusion_config["skip_timesteps"],
+                sparsity=rainfusion_config["sparsity"],
+            )
+
     def forward(
         self,
         attn,
@@ -88,7 +99,8 @@ class xFuserLongContextAttention(LongContextAttention):
         deterministic=False,
         return_attn_probs=False,
         joint_strategy="none",
-        scale=None
+        scale=None,
+        t_idx=-1,
     ) -> Tensor:
         """forward
 
@@ -123,8 +135,16 @@ class xFuserLongContextAttention(LongContextAttention):
             dist.all_gather_into_tensor(v_full, value_layer, group=self.ring_pg)
             value_layer = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
 
-
-        if self.use_all_head:
+        if self.rainfusion_config is not None:
+            out = self.rainfusion_fa(
+                query_layer,
+                key_layer,
+                value_layer,
+                atten_mask_all=self.rainfusion_config["atten_mask_all"],
+                text_len=0,
+                t_idx=t_idx,
+            )
+        elif self.use_all_head:
             if self.algo == 0:
                 out = attention_forward(query_layer, key_layer, value_layer,
                                         opt_mode="manual", op_type="fused_attn_score", layout="BNSD")

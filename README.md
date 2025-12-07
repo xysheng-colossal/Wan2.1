@@ -321,7 +321,7 @@ torchrun --nproc_per_node=16 generate.py \
 - ulysses_size: ulysses并行数
 - vae_parallel: 使能vae并行策略
 
-#### 3.3.2 算法优化
+#### 3.3.2 算法优化--cache
 执行命令：
 ```shell
 export ALGO=0
@@ -341,6 +341,7 @@ torchrun --nproc_per_node=8 generate.py \
 --ulysses_size 4 \
 --vae_parallel \
 --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
+--base_seed 0 \
 --use_attentioncache \
 --start_step 20 \
 --attentioncache_interval 2 \
@@ -354,6 +355,38 @@ torchrun --nproc_per_node=8 generate.py \
 - start_step: cache开始的step
 - attentioncache_interval: 连续cache数
 - end_step: cache结束的step
+
+
+#### 3.3.3 算法优化--稀疏FA
+#### 3.3.3.1 8卡性能测试
+执行命令：
+```shell
+export ALGO=0
+export PYTORCH_NPU_ALLOC_CONF='expandable_segments:True'
+export TASK_QUEUE_ENABLE=2
+export CPU_AFFINITY_CONF=1
+export TOKENIZERS_PARALLELISM=false
+
+torchrun --nproc_per_node=8 generate.py \
+--task t2v-14B \
+--size 1280*720 \
+--ckpt_dir ${model_base} \
+--dit_fsdp \
+--t5_fsdp \
+--sample_steps 50 \
+--cfg_size 2 \
+--ulysses_size 4 \
+--vae_parallel \
+--prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
+--base_seed 0 \
+--use_rainfusion \
+--sparsity 0.64 \
+--sparse_start_step 15
+```
+参数说明：
+- use_rainfusion: 使能稀疏flash attention计算
+- sparsity: 稀疏度，值为[0, 1), 稀疏度越大，加速比越高，相应精度损失更大
+- spasre_start_step: 开始稀疏的时间步，通常需要保证不小于1/4的总时间步数
 
 
 ### 3.4 Wan2.1-I2V-14B
@@ -441,7 +474,7 @@ torchrun --nproc_per_node=8 generate.py \
 - base_seed: 随机种子
 - prompt: 文本提示词
 
-#### 3.4.2 算法优化
+#### 3.4.2 算法优化 --cache
 执行命令：
 ```shell
 export ALGO=0
@@ -479,7 +512,41 @@ torchrun --nproc_per_node=8 generate.py \
 - attentioncache_interval: 连续cache数
 - end_step: cache结束的step
 
-注： 若出现OOM，请添加环境变量`export T5_LOAD_CPU=1`
+
+#### 3.4.3 算法优化--稀疏FA
+#### 3.4.3.1 8卡性能测试
+执行命令：
+```shell
+export ALGO=0
+export PYTORCH_NPU_ALLOC_CONF='expandable_segments:True'
+export TASK_QUEUE_ENABLE=2
+export CPU_AFFINITY_CONF=1
+export TOKENIZERS_PARALLELISM=false
+
+torchrun --nproc_per_node=8 generate.py \
+--task i2v-14B \
+--size 1280*720 \
+--ckpt_dir ${model_base} \
+--frame_num 81 \
+--sample_steps 40 \
+--dit_fsdp \
+--t5_fsdp \
+--cfg_size 2 \
+--ulysses_size 4 \
+--image examples/i2v_input.JPG \
+--prompt "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside." \
+--base_seed 0 \
+--vae_parallel \
+--use_rainfusion \
+--sparsity 0.64 \
+--sparse_start_step 15
+
+```
+参数说明：
+- use_rainfusion: 使能稀疏flash attention计算
+- sparsity: 稀疏度，值为[0, 1), 稀疏度越大，加速比越高，相应精度损失更大
+- spasre_start_step: 开始稀疏的时间步，通常需要保证不小于1/4的总时间步数
+
 
 ## 四、量化功能支持
 新增Wan2.1-T2V、Wan2.1-I2V的W8A8_dynamic量化支持，针对DiT模型进行量化，降低显存占用，提高模型推理性能
@@ -538,9 +605,10 @@ torchrun --nproc_per_node=8 generate.py \
 --cfg_size 2 \
 --ulysses_size 4 \
 --vae_parallel \
---prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." 
+--prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage." \
+--base_seed 0
 ```
-参数说明：
+新增参数说明：
 - quant_dit_path：量化DiT模型权重的路径，传入该参数则使能量化
 
 

@@ -261,7 +261,7 @@ class WanT2V:
                 'seq_len': seq_len
             }
 
-            for _, t in enumerate(tqdm(timesteps)):
+            for t_idx, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
                 timestep = [t]
 
@@ -270,15 +270,15 @@ class WanT2V:
                 self.model.to(self.device)
                 if get_classifier_free_guidance_world_size() == 2:
                     noise_pred = self.model(
-                        latent_model_input, t=timestep, **arg_all)[0]
+                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0]
                     noise_pred_cond, noise_pred_uncond = get_cfg_group().all_gather(
                         noise_pred, separate_tensors=True
                     )
                 else:
                     noise_pred_cond = self.model(
-                        latent_model_input, t=timestep, **arg_c)[0]
+                        latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0]
                     noise_pred_uncond = self.model(
-                        latent_model_input, t=timestep, **arg_null)[0]
+                        latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0]
 
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)

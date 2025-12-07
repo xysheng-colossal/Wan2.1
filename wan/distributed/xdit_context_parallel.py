@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import logging
 import torch
 import torch.cuda.amp as amp
 from .parallel_mgr import (get_sequence_parallel_rank,
@@ -8,7 +9,7 @@ from .parallel_mgr import (get_sequence_parallel_rank,
 from ..modules.attn_layer import xFuserLongContextAttention
 
 from ..modules.model import sinusoidal_embedding_1d
-
+from wan.utils.rainfusion import Rainfusion
 from mindiesd import rotary_position_embedding
 
 def pad_freqs(original_tensor, target_len):
@@ -52,12 +53,20 @@ def usp_dit_forward(
     seq_len,
     clip_fea=None,
     y=None,
+    t_idx=None,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
     t:              [B].
     context:        A list of text embeddings each with shape [L, C].
     """
+    if self.rainfusion_config and self.rainfusion_config["atten_mask_all"] is None:
+        self.rainfusion_config["grid_size"] = Rainfusion.get_grid_size(x[0].shape, self.patch_size)
+        logging.info(f"Rainfusion grid size: {self.rainfusion_config['grid_size']}")
+        self.rainfusion_config["atten_mask_all"] = Rainfusion.get_atten_mask(
+            grid_size=self.rainfusion_config["grid_size"],
+            sparsity=self.rainfusion_config["sparsity"]
+        )
     if self.model_type == 'i2v':
         assert clip_fea is not None and y is not None
     # params
@@ -141,7 +150,10 @@ def usp_dit_forward(
         grid_sizes=grid_sizes,
         freqs=self.freqs_list,
         context=context,
-        context_lens=context_lens)
+        context_lens=context_lens,
+        rainfusion_config=self.rainfusion_config,
+        t_idx=t_idx,
+    )
 
     for block in self.blocks:
         x = block(x, **kwargs)
@@ -163,7 +175,9 @@ def usp_attn_forward(self,
                      grid_sizes,
                      freqs,
                      args,
-                     dtype=torch.bfloat16):
+                     dtype=torch.bfloat16,
+                     rainfusion_config=None, 
+                     t_idx=None):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -181,12 +195,14 @@ def usp_attn_forward(self,
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
 
-    x = xFuserLongContextAttention(args)(
+    x = xFuserLongContextAttention(args, rainfusion_config=rainfusion_config)(
         None,
         query=half(q),
         key=half(k),
         value=half(v),
-        window_size=self.window_size)
+        window_size=self.window_size,
+        t_idx=t_idx,
+    )
 
     # TODO: padding after attention.
     # x = torch.cat([x, x.new_zeros(b, s - x.size(1), n, d)], dim=1)
