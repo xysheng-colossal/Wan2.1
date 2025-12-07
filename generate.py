@@ -383,19 +383,9 @@ def generate(args):
             applicator.apply_to_model(transformer)
         wan_t2v.model.to("npu")
 
-        if args.use_attentioncache:
-            config = CacheConfig(
+        config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks),
-                steps_count=args.sample_steps,
-                step_start=args.start_step,
-                step_interval=args.attentioncache_interval,
-                step_end=args.end_step
-            )
-        else:
-            config = CacheConfig(
-                method="attention_cache",
-                blocks_count=len(transformer.blocks),
+                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
@@ -407,7 +397,7 @@ def generate(args):
             for block in transformer.blocks:
                 block.cache = cache
                 block.args = args
-        
+
         logging.info(f"Warm up 2 steps...")
         video = wan_t2v.generate(
             args.prompt,
@@ -419,7 +409,27 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model)
-        
+
+        if args.use_attentioncache:
+            config = CacheConfig(
+                method="attention_cache",
+                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                steps_count=args.sample_steps,
+                step_start=args.start_step,
+                step_interval=args.attentioncache_interval,
+                step_end=args.end_step
+            )
+            cache = CacheAgent(config)
+            if args.dit_fsdp:
+                for block in transformer._fsdp_wrapped_module.blocks:
+                    block._fsdp_wrapped_module.cache = cache
+                    block._fsdp_wrapped_module.args = args
+            else:
+                for block in transformer.blocks:
+                    block.cache = cache
+                    block.args = args
+
+        logging.info(f"Generating video ...")
         stream.synchronize()
         begin = time.time()
         video = wan_t2v.generate(
@@ -489,19 +499,9 @@ def generate(args):
             applicator.apply_to_model(transformer)
         wan_i2v.model.to("npu")
 
-        if args.use_attentioncache:
-            config = CacheConfig(
+        config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks),
-                steps_count=args.sample_steps,
-                step_start=args.start_step,
-                step_interval=args.attentioncache_interval,
-                step_end=args.end_step
-            )
-        else:
-            config = CacheConfig(
-                method="attention_cache",
-                blocks_count=len(transformer.blocks),
+                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
@@ -513,7 +513,7 @@ def generate(args):
             for block in transformer.blocks:
                 block.cache = cache
                 block.args = args
-        
+
         logging.info(f"Warm up 2 steps...")
         video = wan_i2v.generate(
             args.prompt,
@@ -526,6 +526,25 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model)
+
+        if args.use_attentioncache:
+            config = CacheConfig(
+                method="attention_cache",
+                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                steps_count=args.sample_steps,
+                step_start=args.start_step,
+                step_interval=args.attentioncache_interval,
+                step_end=args.end_step
+            )
+            cache = CacheAgent(config)
+            if args.dit_fsdp:
+                for block in transformer._fsdp_wrapped_module.blocks:
+                    block._fsdp_wrapped_module.cache = cache
+                    block._fsdp_wrapped_module.args = args
+            else:
+                for block in transformer.blocks:
+                    block.cache = cache
+                    block.args = args
 
         logging.info("Generating video ...")
         stream.synchronize()
