@@ -55,15 +55,21 @@ def _validate_args(args):
     # The default sampling steps are 40 for image-to-video tasks and 50 for text-to-video tasks.
     if args.sample_steps is None:
         args.sample_steps = 40 if "i2v" in args.task else 50
+    else:
+        assert args.sample_steps >= 1 , f"sample_steps should be >= 1, but get {args.sample_steps}"
 
     if args.sample_shift is None:
         args.sample_shift = 5.0
         if "i2v" in args.task and args.size in ["832*480", "480*832"]:
             args.sample_shift = 3.0
+    else:
+        assert args.sample_shift > 0.0 , f"sample_shift should be > 0, but get {args.sample_shift}"
 
     # The default number of frames are 1 for text-to-image tasks and 81 for other tasks.
     if args.frame_num is None:
         args.frame_num = 1 if "t2i" in args.task else 81
+    else:
+        assert args.frame_num > 1 and(args.frame_num - 1) % 4 == 0, f"frame_num should be 4n+1 (n>0), but get {args.frame_num}"
 
     # T2I frame_num check
     if "t2i" in args.task:
@@ -71,10 +77,20 @@ def _validate_args(args):
 
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
+    
+    if args.cfg_size < 1 or args.ulysses_size < 1 or args.ring_size < 1 or args.tp_size < 1:
+        raise ValueError(f"cfg_size, ulysses_size, ring_size and tp_size must >= 1, \
+                         but get cfg_size={args.cfg_size}, ulysses_size={args.ulysses_size}, ring_size={args.ring_size}, tp_size={args.tp_size}")
+
+    if args.tp_size > 1:
+        assert args.ulysses_size == 1 and args.ring_size == 1, \
+            f"tp only supported when ulysses_size == 1, and ring_size == 1, but get ulysses_size {args.ulysses_size}, ring_size {args.ring_size}  "
+    
+    assert args.cfg_size in (1, 2), f"cfg_size only support 1 or 2, but get {args.cfg_size}"
+
     # Size check
-    assert args.size in SUPPORTED_SIZES[
-        args.
-        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    assert args.size in SUPPORTED_SIZES[args.task], \
+        f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
 def _parse_args():

@@ -482,7 +482,7 @@ torchrun --nproc_per_node=8 generate.py \
 注： 若出现OOM，请添加环境变量`export T5_LOAD_CPU=1`
 
 ## 四、量化功能支持
-新增Wan2.1-T2V、Wan2.1-I2V的W8A8_dynamic量化支持，针对DiT模型进行量化，降低现存占用，提高模型推理性能
+新增Wan2.1-T2V、Wan2.1-I2V的W8A8_dynamic量化支持，针对DiT模型进行量化，降低显存占用，提高模型推理性能
 ### 4.1 安装量化工具msModelSlim
 下载并安装msmodelslim工具
 ```shell
