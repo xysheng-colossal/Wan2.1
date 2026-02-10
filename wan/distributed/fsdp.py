@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import inspect
 from functools import partial
 import os
 
@@ -35,6 +36,7 @@ def shard_model(
     sharding_strategy=None,
     sync_module_states=None,
     use_legacy_behavior=False,
+    serialize_communication=False,
 ):
     if sharding_strategy is None:
         # Optimized inference defaults to SHARD_GRAD_OP. Legacy restores FULL_SHARD.
@@ -48,16 +50,27 @@ def shard_model(
         sync_module_states = True if use_legacy_behavior else False
 
     sharding_strategy = _resolve_sharding_strategy(sharding_strategy)
-    model = FSDP(
+    fsdp_kwargs = dict(
         module=model,
         process_group=process_group,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=partial(
-            lambda_auto_wrap_policy, lambda_fn=lambda m: m in model.blocks),
+            lambda_auto_wrap_policy, lambda_fn=lambda m: m in model.blocks
+        ),
         mixed_precision=MixedPrecision(
             param_dtype=param_dtype,
             reduce_dtype=reduce_dtype,
-            buffer_dtype=buffer_dtype),
+            buffer_dtype=buffer_dtype,
+        ),
         device_id=device_id,
-        sync_module_states=sync_module_states)
+        sync_module_states=sync_module_states,
+    )
+    if serialize_communication:
+        fsdp_signature = inspect.signature(FSDP.__init__)
+        if "forward_prefetch" in fsdp_signature.parameters:
+            fsdp_kwargs["forward_prefetch"] = False
+        if "limit_all_gathers" in fsdp_signature.parameters:
+            fsdp_kwargs["limit_all_gathers"] = True
+
+    model = FSDP(**fsdp_kwargs)
     return model

@@ -47,6 +47,7 @@ class WanT2V:
         use_vae_parallel=False,
         quant_dit_path=None,
         use_legacy_perf=False,
+        serialize_comm=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -82,6 +83,7 @@ class WanT2V:
             shard_model,
             device_id=device_id,
             use_legacy_behavior=use_legacy_perf,
+            serialize_communication=serialize_comm,
         )
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,

@@ -120,9 +120,24 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
 
-        query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+        query_layer = all_to_all_4D(
+            input_=query,
+            scatter_idx=2,
+            gather_idx=1,
+            group=self.ulysses_pg,
+        )
+        key_layer = all_to_all_4D(
+            input_=key,
+            scatter_idx=2,
+            gather_idx=1,
+            group=self.ulysses_pg,
+        )
+        value_layer = all_to_all_4D(
+            input_=value,
+            scatter_idx=2,
+            gather_idx=1,
+            group=self.ulysses_pg,
+        )
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size
@@ -179,7 +194,11 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
+        output = all_to_all_4D(
+            input_=context_layer,
+            scatter_idx=1,
+            gather_idx=2,
+            group=self.ulysses_pg,
+        )
 
         return output
-

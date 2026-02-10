@@ -141,6 +141,12 @@ def _parse_args():
         help="Select inference logic for A/B perf comparison.",
     )
     parser.add_argument(
+        "--serialize_comm",
+        action="store_true",
+        default=False,
+        help="Enable lightweight serialization on FSDP all-gather scheduling only.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -407,6 +413,7 @@ def generate(args):
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
             use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_t2v.model
@@ -535,6 +542,7 @@ def generate(args):
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
             use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_i2v.model
@@ -578,7 +586,8 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model,
-            profile_stage=False)
+            profile_stage=False,
+            )
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -614,6 +623,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
             profile_stage=args.profile_stage)
+
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
