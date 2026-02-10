@@ -21,6 +21,7 @@ from mindiesd import attention_forward
 
 logger = logging.getLogger(__name__)
 MAX_TOKEN = 2147483647
+_QKV_A2A_MODE_LOGGED = False
 
 class xFuserLongContextAttention(LongContextAttention):
     ring_impl_type_supported_kv_cache = ["basic"]
@@ -132,32 +133,62 @@ class xFuserLongContextAttention(LongContextAttention):
 
         total_start = profile_start()
 
-        t0 = profile_start()
-        query_layer = all_to_all_4D(
-            input_=query,
-            scatter_idx=2,
-            gather_idx=1,
-            group=self.ulysses_pg,
-        )
-        profile_stop("q_all_to_all", t0)
+        use_packed_qkv_a2a = os.getenv("WAN_PACKED_QKV_A2A", "1") != "0"
+        global _QKV_A2A_MODE_LOGGED
+        if not _QKV_A2A_MODE_LOGGED:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                mode = "packed_qkv_single_all_to_all" if use_packed_qkv_a2a else "legacy_qkv_three_all_to_all"
+                logger.info(f"Attention all_to_all mode: {mode} (WAN_PACKED_QKV_A2A={'1' if use_packed_qkv_a2a else '0'})")
+            _QKV_A2A_MODE_LOGGED = True
+        if use_packed_qkv_a2a:
+            t0 = profile_start()
+            qkv = torch.cat([query, key, value], dim=-1)
+            profile_stop("qkv_concat", t0)
 
-        t0 = profile_start()
-        key_layer = all_to_all_4D(
-            input_=key,
-            scatter_idx=2,
-            gather_idx=1,
-            group=self.ulysses_pg,
-        )
-        profile_stop("k_all_to_all", t0)
+            t0 = profile_start()
+            qkv_layer = all_to_all_4D(
+                input_=qkv,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+            )
+            profile_stop("qkv_all_to_all", t0)
 
-        t0 = profile_start()
-        value_layer = all_to_all_4D(
-            input_=value,
-            scatter_idx=2,
-            gather_idx=1,
-            group=self.ulysses_pg,
-        )
-        profile_stop("v_all_to_all", t0)
+            t0 = profile_start()
+            q_dim = query.shape[-1]
+            k_dim = key.shape[-1]
+            v_dim = value.shape[-1]
+            query_layer, key_layer, value_layer = torch.split(
+                qkv_layer, [q_dim, k_dim, v_dim], dim=-1
+            )
+            profile_stop("qkv_split", t0)
+        else:
+            t0 = profile_start()
+            query_layer = all_to_all_4D(
+                input_=query,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+            )
+            profile_stop("q_all_to_all", t0)
+
+            t0 = profile_start()
+            key_layer = all_to_all_4D(
+                input_=key,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+            )
+            profile_stop("k_all_to_all", t0)
+
+            t0 = profile_start()
+            value_layer = all_to_all_4D(
+                input_=value,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+            )
+            profile_stop("v_all_to_all", t0)
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size

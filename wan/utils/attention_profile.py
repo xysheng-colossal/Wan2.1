@@ -77,6 +77,7 @@ class AttentionProfiler:
             return
 
         summaries = []
+        summary_map = {}
         if self.rank == 0:
             logging.info(f"[{self.name} AttnProfile] ==== Attention Internal Breakdown (ms) ====")
 
@@ -89,6 +90,7 @@ class AttentionProfiler:
             )
             call_avg = total_sum / max(count_sum, 1.0)
             summaries.append((stage_name, total_max, total_avg, call_avg, max_call, int(count_sum)))
+            summary_map[stage_name] = (total_max, total_avg, call_avg, max_call, int(count_sum))
             if self.rank == 0:
                 logging.info(
                     f"[{self.name} AttnProfile] {stage_name}: "
@@ -96,9 +98,78 @@ class AttentionProfiler:
                     f"call_avg={call_avg:.3f}, call_max={max_call:.3f}, calls={int(count_sum)}"
                 )
 
-        self._append_report_file(summaries)
+        ratio_summaries = self._build_ratio_summaries(summary_map)
+        if self.rank == 0 and ratio_summaries:
+            logging.info(f"[{self.name} AttnProfile] ==== Attention Ratios ====")
+            for key, max_ratio, avg_ratio in ratio_summaries:
+                logging.info(
+                    f"[{self.name} AttnProfile] {key}: "
+                    f"max_ratio={max_ratio:.2%}, avg_ratio={avg_ratio:.2%}"
+                )
 
-    def _append_report_file(self, summaries):
+        self._append_report_file(summaries, ratio_summaries)
+
+    @staticmethod
+    def _sum_stage(summary_map, stage_names):
+        total_max = 0.0
+        total_avg = 0.0
+        for name in stage_names:
+            if name in summary_map:
+                total_max += summary_map[name][0]
+                total_avg += summary_map[name][1]
+        return total_max, total_avg
+
+    def _build_ratio_summaries(self, summary_map):
+        if "attn_forward_total" not in summary_map:
+            return []
+
+        total_max, total_avg = summary_map["attn_forward_total"][0], summary_map["attn_forward_total"][1]
+        if total_max <= 0 or total_avg <= 0:
+            return []
+
+        kernel_max, kernel_avg = self._sum_stage(summary_map, ["attn_kernel"])
+        packed_comm_max, packed_comm_avg = self._sum_stage(
+            summary_map,
+            [
+                "qkv_all_to_all",
+                "kv_ring_k_all_gather",
+                "kv_ring_v_all_gather",
+                "out_all_to_all",
+            ],
+        )
+        legacy_comm_max, legacy_comm_avg = self._sum_stage(
+            summary_map,
+            [
+                "q_all_to_all",
+                "k_all_to_all",
+                "v_all_to_all",
+                "kv_ring_k_all_gather",
+                "kv_ring_v_all_gather",
+                "out_all_to_all",
+            ],
+        )
+        comm_max = packed_comm_max if packed_comm_max > 0 else legacy_comm_max
+        comm_avg = packed_comm_avg if packed_comm_avg > 0 else legacy_comm_avg
+
+        ratio_summaries = []
+        ratio_summaries.append(("kernel_share", kernel_max / total_max, kernel_avg / total_avg))
+        ratio_summaries.append(("comm_share", comm_max / total_max, comm_avg / total_avg))
+        pack_overhead_max, pack_overhead_avg = self._sum_stage(
+            summary_map, ["qkv_concat", "qkv_split"]
+        )
+        if pack_overhead_max > 0 or pack_overhead_avg > 0:
+            ratio_summaries.append(
+                ("pack_overhead_share", pack_overhead_max / total_max, pack_overhead_avg / total_avg)
+            )
+
+        uncovered_max = max(total_max - kernel_max - comm_max, 0.0)
+        uncovered_avg = max(total_avg - kernel_avg - comm_avg, 0.0)
+        ratio_summaries.append(
+            ("uncovered_share", uncovered_max / total_max, uncovered_avg / total_avg)
+        )
+        return ratio_summaries
+
+    def _append_report_file(self, summaries, ratio_summaries):
         if self.rank != 0 or not self.output_file:
             return
         try:
@@ -117,6 +188,8 @@ class AttentionProfiler:
                         f"{total_max:.3f},{total_avg:.3f},"
                         f"{call_avg:.3f},{max_call:.3f},{calls}\n"
                     )
+                for key, max_ratio, avg_ratio in ratio_summaries:
+                    f.write(f"ATTN_RATIO,{key},{max_ratio:.6f},{avg_ratio:.6f}\n")
                 f.write("ATTN_END\n")
         except Exception as exc:
             logging.warning(
