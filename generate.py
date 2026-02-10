@@ -134,6 +134,12 @@ def _parse_args():
         help="Print detailed server-side stage timing instead of using offline profile traces.",
     )
     parser.add_argument(
+        "--profile_stage_file",
+        type=str,
+        default=None,
+        help="Append concise stage profile report to this file (RUN/TOTAL/STEP/SLOW format).",
+    )
+    parser.add_argument(
         "--perf_logic",
         type=str,
         default="optimized",
@@ -145,12 +151,6 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Enable lightweight serialization on FSDP all-gather scheduling only.",
-    )
-    parser.add_argument(
-        "--fuse_cfg_forward",
-        action="store_true",
-        default=False,
-        help="Fuse cond/uncond DiT forward into one batched forward when cfg_size=1.",
     )
     parser.add_argument(
         "--cfg_size",
@@ -318,6 +318,10 @@ def _attach_cache_to_transformer(transformer, dit_fsdp, cache, args):
             block.args = args
 
 
+def _get_cache_blocks_count(args, transformer):
+    return len(transformer.blocks) * 2 // args.cfg_size
+
+
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -455,7 +459,7 @@ def generate(args):
 
         config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
@@ -471,7 +475,6 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
             legacy_model_to_each_step=use_legacy_perf,
-            fuse_cfg_forward=args.fuse_cfg_forward,
         )
 
         logging.info(f"Warm up 2 steps...")
@@ -486,14 +489,14 @@ def generate(args):
             seed=t2v_generate_kwargs["seed"],
             offload_model=t2v_generate_kwargs["offload_model"],
             profile_stage=False,
+            profile_stage_file=None,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
-            fuse_cfg_forward=t2v_generate_kwargs["fuse_cfg_forward"],
         )
 
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps,
                 step_start=args.start_step,
                 step_interval=args.attentioncache_interval,
@@ -516,8 +519,8 @@ def generate(args):
             seed=t2v_generate_kwargs["seed"],
             offload_model=t2v_generate_kwargs["offload_model"],
             profile_stage=args.profile_stage,
+            profile_stage_file=args.profile_stage_file,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
-            fuse_cfg_forward=t2v_generate_kwargs["fuse_cfg_forward"],
         )
         stream.synchronize()
         end = time.time()
@@ -586,7 +589,7 @@ def generate(args):
 
         config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
@@ -617,12 +620,13 @@ def generate(args):
             seed=i2v_generate_kwargs["seed"],
             offload_model=i2v_generate_kwargs["offload_model"],
             profile_stage=False,
+            profile_stage_file=None,
         )
 
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps,
                 step_start=args.start_step,
                 step_interval=args.attentioncache_interval,
@@ -646,6 +650,7 @@ def generate(args):
             seed=i2v_generate_kwargs["seed"],
             offload_model=i2v_generate_kwargs["offload_model"],
             profile_stage=args.profile_stage,
+            profile_stage_file=args.profile_stage_file,
         )
 
         stream.synchronize()

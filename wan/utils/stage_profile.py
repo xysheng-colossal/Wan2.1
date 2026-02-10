@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
+import os
 import time
 from collections import defaultdict
 
@@ -8,12 +9,21 @@ import torch.distributed as dist
 
 
 class StageProfiler:
-    def __init__(self, enabled, device, rank, name="Inference", top_k=5):
+    def __init__(
+        self,
+        enabled,
+        device,
+        rank,
+        name="Inference",
+        top_k=5,
+        output_file=None,
+    ):
         self.enabled = enabled
         self.device = device
         self.rank = rank
         self.name = name
         self.top_k = top_k
+        self.output_file = output_file
         self.stage_totals_ms = defaultdict(float)
         self.step_metrics_ms = defaultdict(list)
 
@@ -80,18 +90,23 @@ class StageProfiler:
         if not self.enabled:
             return
 
+        stage_summaries = []
+        step_summaries = []
+
         if self.stage_totals_ms:
             if self.rank == 0:
                 logging.info(f"[{self.name} StageProfile] ==== Stage Totals (ms, max_rank / avg_rank) ====")
             for stage_name in sorted(self.stage_totals_ms):
                 total_ms = self.stage_totals_ms[stage_name]
                 max_ms, avg_ms = self._reduce_scalar(total_ms)
+                stage_summaries.append((stage_name, max_ms, avg_ms))
                 if self.rank == 0:
                     logging.info(
                         f"[{self.name} StageProfile] {stage_name}: {max_ms:.3f} / {avg_ms:.3f}"
                     )
 
         if not self.step_metrics_ms:
+            self._append_report_file(stage_summaries, step_summaries)
             return
 
         if self.rank == 0:
@@ -108,18 +123,72 @@ class StageProfiler:
                 min_ms = min(max_series)
                 max_ms = max(max_series)
                 avg_rank_avg_ms = sum(avg_series) / len(avg_series)
+                slowest = sorted(
+                    enumerate(max_series), key=lambda x: x[1], reverse=True
+                )[: self.top_k]
+                step_summaries.append(
+                    (
+                        metric_name,
+                        avg_ms,
+                        p50_ms,
+                        p90_ms,
+                        min_ms,
+                        max_ms,
+                        avg_rank_avg_ms,
+                        slowest,
+                    )
+                )
                 logging.info(
                     f"[{self.name} StageProfile] {metric_name}: "
                     f"avg={avg_ms:.3f}, p50={p50_ms:.3f}, p90={p90_ms:.3f}, "
                     f"min={min_ms:.3f}, max={max_ms:.3f}, avg_rank_avg={avg_rank_avg_ms:.3f}"
                 )
 
-                slowest = sorted(
-                    enumerate(max_series), key=lambda x: x[1], reverse=True
-                )[: self.top_k]
                 slowest_str = ", ".join(
                     [f"step{idx}:{val:.3f}" for idx, val in slowest]
                 )
                 logging.info(
                     f"[{self.name} StageProfile] {metric_name} slowest {self.top_k}: {slowest_str}"
                 )
+
+        self._append_report_file(stage_summaries, step_summaries)
+
+    def _append_report_file(self, stage_summaries, step_summaries):
+        if self.rank != 0 or not self.output_file:
+            return
+        try:
+            output_dir = os.path.dirname(os.path.abspath(self.output_file))
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            with open(self.output_file, "a", encoding="utf-8") as f:
+                f.write(f"RUN,{ts},{self.name},world_size={world_size}\n")
+                for stage_name, max_ms, avg_ms in stage_summaries:
+                    f.write(f"TOTAL,{stage_name},{max_ms:.3f},{avg_ms:.3f}\n")
+                for (
+                    metric_name,
+                    avg_ms,
+                    p50_ms,
+                    p90_ms,
+                    min_ms,
+                    max_ms,
+                    avg_rank_avg_ms,
+                    slowest,
+                ) in step_summaries:
+                    f.write(
+                        "STEP,"
+                        f"{metric_name},"
+                        f"{avg_ms:.3f},{p50_ms:.3f},{p90_ms:.3f},"
+                        f"{min_ms:.3f},{max_ms:.3f},{avg_rank_avg_ms:.3f}\n"
+                    )
+                    slowest_str = ";".join(
+                        [f"step{idx}:{val:.3f}" for idx, val in slowest]
+                    )
+                    f.write(f"SLOW,{metric_name},{slowest_str}\n")
+                f.write("END\n")
+        except Exception as exc:
+            logging.warning(
+                f"[{self.name} StageProfile] failed to append profile file {self.output_file}: {exc}"
+            )

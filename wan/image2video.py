@@ -177,7 +177,8 @@ class WanI2V:
                  n_prompt="",
                  seed=-1,
                  offload_model=True,
-                 profile_stage=False):
+                 profile_stage=False,
+                 profile_stage_file=None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -207,6 +208,8 @@ class WanI2V:
                 If True, offloads models to CPU during generation to save VRAM
             profile_stage (`bool`, *optional*, defaults to False):
                 If True, prints detailed stage timing logs on server side
+            profile_stage_file (`str`, *optional*, defaults to None):
+                If set, append concise stage profiling report lines into this file
 
         Returns:
             torch.Tensor:
@@ -221,6 +224,7 @@ class WanI2V:
             device=self.device,
             rank=self.rank,
             name="I2V",
+            output_file=profile_stage_file,
         )
         total_start = profiler.start()
 
