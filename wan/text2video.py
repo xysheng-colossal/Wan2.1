@@ -22,6 +22,10 @@ from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .utils.stage_profile import StageProfiler
+from .utils.attention_profile import (
+    configure_attention_profiler,
+    report_attention_profiler,
+)
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 
 from wan.distributed.parallel_mgr import (
@@ -159,6 +163,8 @@ class WanT2V:
                  offload_model=True,
                  profile_stage=False,
                  profile_stage_file=None,
+                 profile_attn=False,
+                 profile_attn_file=None,
                  legacy_model_to_each_step=False):
         r"""
         Generates video frames from text prompt using diffusion process.
@@ -188,6 +194,10 @@ class WanT2V:
                 If True, prints detailed stage timing logs on server side
             profile_stage_file (`str`, *optional*, defaults to None):
                 If set, append concise stage profiling report lines into this file
+            profile_attn (`bool`, *optional*, defaults to False):
+                If True, enable internal attention stage profiling
+            profile_attn_file (`str`, *optional*, defaults to None):
+                If set, append concise attention profiling lines into this file
             legacy_model_to_each_step (`bool`, *optional*, defaults to False):
                 If True, keeps legacy behavior of calling `model.to(device)` at each denoise step
 
@@ -205,6 +215,13 @@ class WanT2V:
             rank=self.rank,
             name="T2V",
             output_file=profile_stage_file,
+        )
+        configure_attention_profiler(
+            enabled=profile_attn,
+            device=self.device,
+            rank=self.rank,
+            name="T2V",
+            output_file=profile_attn_file,
         )
         total_start = profiler.start()
 
@@ -402,5 +419,6 @@ class WanT2V:
 
         profiler.stop("request_total", total_start)
         profiler.report()
+        report_attention_profiler()
 
         return videos[0] if self.rank == 0 else None

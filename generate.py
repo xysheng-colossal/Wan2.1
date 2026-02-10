@@ -140,6 +140,18 @@ def _parse_args():
         help="Append concise stage profile report to this file (RUN/TOTAL/STEP/SLOW format).",
     )
     parser.add_argument(
+        "--profile_attn",
+        action="store_true",
+        default=False,
+        help="Enable internal attention breakdown profiling.",
+    )
+    parser.add_argument(
+        "--profile_attn_file",
+        type=str,
+        default=None,
+        help="Append concise attention profile report to this file (ATTN_RUN/ATTN format).",
+    )
+    parser.add_argument(
         "--perf_logic",
         type=str,
         default="optimized",
@@ -476,6 +488,7 @@ def generate(args):
             offload_model=args.offload_model,
             legacy_model_to_each_step=use_legacy_perf,
         )
+        attn_profile_file = args.profile_attn_file or args.profile_stage_file
 
         logging.info(f"Warm up 2 steps...")
         video = wan_t2v.generate(
@@ -490,6 +503,8 @@ def generate(args):
             offload_model=t2v_generate_kwargs["offload_model"],
             profile_stage=False,
             profile_stage_file=None,
+            profile_attn=False,
+            profile_attn_file=None,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
         )
 
@@ -520,6 +535,8 @@ def generate(args):
             offload_model=t2v_generate_kwargs["offload_model"],
             profile_stage=args.profile_stage,
             profile_stage_file=args.profile_stage_file,
+            profile_attn=args.profile_attn,
+            profile_attn_file=attn_profile_file,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
         )
         stream.synchronize()
@@ -606,6 +623,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
         )
+        attn_profile_file = args.profile_attn_file or args.profile_stage_file
 
         logging.info(f"Warm up 2 steps...")
         video = wan_i2v.generate(
@@ -621,6 +639,8 @@ def generate(args):
             offload_model=i2v_generate_kwargs["offload_model"],
             profile_stage=False,
             profile_stage_file=None,
+            profile_attn=False,
+            profile_attn_file=None,
         )
 
         if args.use_attentioncache:
@@ -651,6 +671,8 @@ def generate(args):
             offload_model=i2v_generate_kwargs["offload_model"],
             profile_stage=args.profile_stage,
             profile_stage_file=args.profile_stage_file,
+            profile_attn=args.profile_attn,
+            profile_attn_file=attn_profile_file,
         )
 
         stream.synchronize()

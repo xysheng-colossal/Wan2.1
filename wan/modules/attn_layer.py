@@ -15,6 +15,7 @@ from typing import Any
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
 from wan.utils.rainfusion import Rainfusion
+from wan.utils.attention_profile import get_attention_profiler
 
 from mindiesd import attention_forward
 
@@ -120,36 +121,60 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
 
+        profiler = get_attention_profiler()
+
+        def profile_start():
+            return profiler.start() if profiler is not None else None
+
+        def profile_stop(stage_name, start_time):
+            if profiler is not None:
+                profiler.stop(stage_name, start_time)
+
+        total_start = profile_start()
+
+        t0 = profile_start()
         query_layer = all_to_all_4D(
             input_=query,
             scatter_idx=2,
             gather_idx=1,
             group=self.ulysses_pg,
         )
+        profile_stop("q_all_to_all", t0)
+
+        t0 = profile_start()
         key_layer = all_to_all_4D(
             input_=key,
             scatter_idx=2,
             gather_idx=1,
             group=self.ulysses_pg,
         )
+        profile_stop("k_all_to_all", t0)
+
+        t0 = profile_start()
         value_layer = all_to_all_4D(
             input_=value,
             scatter_idx=2,
             gather_idx=1,
             group=self.ulysses_pg,
         )
+        profile_stop("v_all_to_all", t0)
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size
             b, s, n, d = key_layer.shape
             k_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            t0 = profile_start()
             dist.all_gather_into_tensor(k_full, key_layer, group=self.ring_pg)
             key_layer = k_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+            profile_stop("kv_ring_k_all_gather", t0)
 
             v_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            t0 = profile_start()
             dist.all_gather_into_tensor(v_full, value_layer, group=self.ring_pg)
             value_layer = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+            profile_stop("kv_ring_v_all_gather", t0)
 
+        t0 = profile_start()
         if self.rainfusion_config is not None:
             out = self.rainfusion_fa(
                 query_layer,
@@ -186,6 +211,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
                 output.append(out)
             out = torch.cat(output, dim=2)
+        profile_stop("attn_kernel", t0)
 
         if type(out) == tuple:
             context_layer, _, _ = out
@@ -194,11 +220,14 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
+        t0 = profile_start()
         output = all_to_all_4D(
             input_=context_layer,
             scatter_idx=1,
             gather_idx=2,
             group=self.ulysses_pg,
         )
+        profile_stop("out_all_to_all", t0)
+        profile_stop("attn_forward_total", total_start)
 
         return output
