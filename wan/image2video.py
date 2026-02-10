@@ -48,6 +48,7 @@ class WanI2V:
         init_on_cpu=True,
         use_vae_parallel=False,
         quant_dit_path=None,
+        use_legacy_perf=False,
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -82,7 +83,11 @@ class WanI2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
 
-        shard_fn = partial(shard_model, device_id=device_id)
+        shard_fn = partial(
+            shard_model,
+            device_id=device_id,
+            use_legacy_behavior=use_legacy_perf,
+        )
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,

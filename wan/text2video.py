@@ -46,6 +46,7 @@ class WanT2V:
         t5_cpu=False,
         use_vae_parallel=False,
         quant_dit_path=None,
+        use_legacy_perf=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -77,7 +78,11 @@ class WanT2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
 
-        shard_fn = partial(shard_model, device_id=device_id)
+        shard_fn = partial(
+            shard_model,
+            device_id=device_id,
+            use_legacy_behavior=use_legacy_perf,
+        )
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -150,7 +155,8 @@ class WanT2V:
                  n_prompt="",
                  seed=-1,
                  offload_model=True,
-                 profile_stage=False):
+                 profile_stage=False,
+                 legacy_model_to_each_step=False):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -177,6 +183,8 @@ class WanT2V:
                 If True, offloads models to CPU during generation to save VRAM
             profile_stage (`bool`, *optional*, defaults to False):
                 If True, prints detailed stage timing logs on server side
+            legacy_model_to_each_step (`bool`, *optional*, defaults to False):
+                If True, keeps legacy behavior of calling `model.to(device)` at each denoise step
 
         Returns:
             torch.Tensor:
@@ -296,9 +304,10 @@ class WanT2V:
                 'seq_len': seq_len
             }
 
-            t0 = profiler.start()
-            self.model.to(self.device)
-            profiler.stop("dit_to_device", t0)
+            if not legacy_model_to_each_step:
+                t0 = profiler.start()
+                self.model.to(self.device)
+                profiler.stop("dit_to_device", t0)
 
             denoise_loop_start = profiler.start()
             for t_idx, t in enumerate(tqdm(timesteps)):
@@ -307,6 +316,11 @@ class WanT2V:
                 timestep = [t]
 
                 timestep = torch.stack(timestep)
+
+                if legacy_model_to_each_step:
+                    t0 = profiler.start()
+                    self.model.to(self.device)
+                    profiler.stop("dit_to_device_per_step", t0, per_step=True)
 
                 if get_classifier_free_guidance_world_size() == 2:
                     t0 = profiler.start()

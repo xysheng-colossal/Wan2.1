@@ -134,6 +134,13 @@ def _parse_args():
         help="Print detailed server-side stage timing instead of using offline profile traces.",
     )
     parser.add_argument(
+        "--perf_logic",
+        type=str,
+        default="optimized",
+        choices=["legacy", "optimized"],
+        help="Select inference logic for A/B perf comparison.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -347,6 +354,7 @@ def generate(args):
 
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
+    use_legacy_perf = args.perf_logic == "legacy"
 
     if dist.is_initialized():
         base_seed = [args.base_seed] if rank == 0 else [None]
@@ -398,6 +406,7 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
         )
 
         transformer = wan_t2v.model
@@ -440,7 +449,8 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model,
-            profile_stage=False)
+            profile_stage=False,
+            legacy_model_to_each_step=use_legacy_perf)
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -474,7 +484,8 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model,
-            profile_stage=args.profile_stage)
+            profile_stage=args.profile_stage,
+            legacy_model_to_each_step=use_legacy_perf)
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
@@ -523,6 +534,7 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
         )
 
         transformer = wan_i2v.model

@@ -48,7 +48,7 @@ class StageProfiler:
             return value, value
 
         world_size = dist.get_world_size()
-        value_tensor = torch.tensor([value], dtype=torch.float64, device=self.device)
+        value_tensor = torch.tensor([value], dtype=torch.float32, device=self.device)
         max_tensor = value_tensor.clone()
         sum_tensor = value_tensor.clone()
         dist.all_reduce(max_tensor, op=dist.ReduceOp.MAX)
@@ -62,7 +62,7 @@ class StageProfiler:
             return values, values
 
         world_size = dist.get_world_size()
-        value_tensor = torch.tensor(values, dtype=torch.float64, device=self.device)
+        value_tensor = torch.tensor(values, dtype=torch.float32, device=self.device)
         max_tensor = value_tensor.clone()
         sum_tensor = value_tensor.clone()
         dist.all_reduce(max_tensor, op=dist.ReduceOp.MAX)

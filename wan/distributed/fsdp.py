@@ -32,12 +32,21 @@ def shard_model(
     reduce_dtype=torch.float32,
     buffer_dtype=torch.float32,
     process_group=None,
-    # Inference defaults to SHARD_GRAD_OP to avoid repeated per-step all-gather.
-    # Set WAN_FSDP_SHARDING_STRATEGY=FULL_SHARD to restore previous behavior.
-    sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,
-    # All ranks load the same checkpoint; avoid one-time state sync by default.
-    sync_module_states=False,
+    sharding_strategy=None,
+    sync_module_states=None,
+    use_legacy_behavior=False,
 ):
+    if sharding_strategy is None:
+        # Optimized inference defaults to SHARD_GRAD_OP. Legacy restores FULL_SHARD.
+        sharding_strategy = (
+            ShardingStrategy.FULL_SHARD
+            if use_legacy_behavior
+            else ShardingStrategy.SHARD_GRAD_OP
+        )
+    if sync_module_states is None:
+        # Legacy default follows previous behavior for DiT FSDP construction.
+        sync_module_states = True if use_legacy_behavior else False
+
     sharding_strategy = _resolve_sharding_strategy(sharding_strategy)
     model = FSDP(
         module=model,
