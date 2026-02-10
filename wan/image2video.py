@@ -24,6 +24,7 @@ from .modules.vae import WanVAE
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .utils.stage_profile import StageProfiler
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 from wan.distributed.parallel_mgr import (
     get_sequence_parallel_world_size,
@@ -168,7 +169,8 @@ class WanI2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 profile_stage=False):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -196,6 +198,8 @@ class WanI2V:
                 Random seed for noise generation. If -1, use random seed
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            profile_stage (`bool`, *optional*, defaults to False):
+                If True, prints detailed stage timing logs on server side
 
         Returns:
             torch.Tensor:
@@ -205,7 +209,17 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
+        profiler = StageProfiler(
+            enabled=profile_stage,
+            device=self.device,
+            rank=self.rank,
+            name="I2V",
+        )
+        total_start = profiler.start()
+
+        t0 = profiler.start()
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device)
+        profiler.stop("image_preprocess", t0)
 
         F = frame_num
         h, w = img.shape[1:]
@@ -228,6 +242,7 @@ class WanI2V:
         seed_g.manual_seed(seed)
 
         latent_frame_num = (F - 1) // self.vae_stride[0] + 1
+        t0 = profiler.start()
         noise = torch.randn(
             16, 
             latent_frame_num, 
@@ -236,7 +251,9 @@ class WanI2V:
             dtype=torch.float32, 
             generator=seed_g, 
             device=self.device)
+        profiler.stop("noise_init", t0)
 
+        t0 = profiler.start()
         msk = torch.ones(1, F, lat_h, lat_w, device=self.device)
         msk[:, 1:] = 0
         msk = torch.concat([
@@ -245,27 +262,48 @@ class WanI2V:
                            dim=1)
         msk = msk.view(1, latent_frame_num, 4, lat_h, lat_w)
         msk = msk.transpose(1, 2)[0]
+        profiler.stop("mask_prepare", t0)
 
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
 
         # preprocess
         if not self.t5_cpu:
+            t0 = profiler.start()
             self.text_encoder.model.to(self.device)
+            profiler.stop("t5_to_device", t0)
+
+            t0 = profiler.start()
             context = self.text_encoder([input_prompt], self.device)
+            profiler.stop("text_encode_pos", t0)
+
+            t0 = profiler.start()
             context_null = self.text_encoder([n_prompt], self.device)
+            profiler.stop("text_encode_neg", t0)
             if offload_model:
+                t0 = profiler.start()
                 self.text_encoder.model.cpu()
+                profiler.stop("t5_offload_cpu", t0)
         else:
+            t0 = profiler.start()
             context = self.text_encoder([input_prompt], torch.device('cpu'))
+            profiler.stop("text_encode_pos_cpu", t0)
+
+            t0 = profiler.start()
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
+            profiler.stop("text_encode_neg_cpu", t0)
+
+            t0 = profiler.start()
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
+            profiler.stop("text_context_to_device", t0)
 
+        t0 = profiler.start()
         self.clip.model.to(self.device)
         clip_context = self.clip.visual([img[:, None, :, :]])
         if offload_model:
             self.clip.model.cpu()
+        profiler.stop("clip_encode", t0)
         # NOTE 下面是源代码interpolate 在cpu 计算,下面移动到NPU上计算,有细微差异
         '''
         encode_input = torch.concat([
@@ -277,19 +315,25 @@ class WanI2V:
             dim=1).to(self.device)
         '''
         # 这里在是NPU 上计算会快一些
+        t0 = profiler.start()
         encode_input = torch.concat([
                     torch.nn.functional.interpolate(
                         img[None].to(self.device), size=(h, w), mode='bicubic').transpose(
                             0, 1),
                         torch.zeros(3, F - 1, h, w, device = self.device)],
                      dim=1)
+        profiler.stop("vae_encode_input_prepare", t0)
         
+        t0 = profiler.start()
         with VAE_patch_parallel():
             y = self.vae.encode([
                 encode_input
             ])[0]
+        profiler.stop("vae_encode", t0)
 
+        t0 = profiler.start()
         y = torch.concat([msk, y])
+        profiler.stop("cond_concat", t0)
 
         @contextmanager
         def noop_no_sync():
@@ -299,6 +343,7 @@ class WanI2V:
 
         # evaluation mode
         with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
+            t0 = profiler.start()
 
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
@@ -320,6 +365,7 @@ class WanI2V:
                     sigmas=sampling_sigmas)
             else:
                 raise NotImplementedError("Unsupported solver.")
+            profiler.stop("scheduler_setup", t0)
 
             # sample videos
             latent = noise
@@ -346,57 +392,95 @@ class WanI2V:
             }
 
             if offload_model:
+                t0 = profiler.start()
                 torch.cuda.empty_cache()
+                profiler.stop("pre_denoise_empty_cache", t0)
 
+            t0 = profiler.start()
             self.model.to(self.device)
+            profiler.stop("dit_to_device", t0)
+
+            denoise_loop_start = profiler.start()
             for t_idx, t in enumerate(tqdm(timesteps)):
+                step_start = profiler.start()
                 latent_model_input = [latent.to(self.device)]
                 timestep = [t]
 
                 timestep = torch.stack(timestep).to(self.device)
 
                 if get_classifier_free_guidance_world_size() == 2:
+                    t0 = profiler.start()
                     noise_pred = self.model(
                         latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0].to(
                             torch.device('cpu') if offload_model else self.device)
+                    profiler.stop("dit_forward", t0, per_step=True)
+
+                    t0 = profiler.start()
                     noise_pred_cond, noise_pred_uncond = get_cfg_group().all_gather(
                         noise_pred, separate_tensors=True
                     )
+                    profiler.stop("cfg_allgather", t0, per_step=True)
                     if offload_model:
+                        t0 = profiler.start()
                         torch.cuda.empty_cache()
+                        profiler.stop("step_empty_cache_after_gather", t0, per_step=True)
                 else:
+                    t0 = profiler.start()
                     noise_pred_cond = self.model(
                         latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0].to(
                             torch.device('cpu') if offload_model else self.device)
+                    profiler.stop("dit_forward_cond", t0, per_step=True)
                     if offload_model:
+                        t0 = profiler.start()
                         torch.cuda.empty_cache()
+                        profiler.stop("step_empty_cache_after_cond", t0, per_step=True)
+
+                    t0 = profiler.start()
                     noise_pred_uncond = self.model(
                         latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0].to(
                             torch.device('cpu') if offload_model else self.device)
+                    profiler.stop("dit_forward_uncond", t0, per_step=True)
                     if offload_model:
+                        t0 = profiler.start()
                         torch.cuda.empty_cache()
+                        profiler.stop("step_empty_cache_after_uncond", t0, per_step=True)
+
+                t0 = profiler.start()
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
+                profiler.stop("cfg_combine", t0, per_step=True)
 
+                t0 = profiler.start()
                 latent = latent.to(
                     torch.device('cpu') if offload_model else self.device)
+                profiler.stop("latent_to_target_device", t0, per_step=True)
 
+                t0 = profiler.start()
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
                     t,
                     latent.unsqueeze(0),
                     return_dict=False,
                     generator=seed_g)[0]
+                profiler.stop("scheduler_step", t0, per_step=True)
                 latent = temp_x0.squeeze(0)
 
+                t0 = profiler.start()
                 x0 = [latent.to(self.device)]
+                profiler.stop("x0_to_device", t0, per_step=True)
                 del latent_model_input, timestep
+                profiler.stop("denoise_step_total", step_start, per_step=True)
+            profiler.stop("denoise_loop_total", denoise_loop_start)
 
             if offload_model:
+                t0 = profiler.start()
                 self.model.cpu()
                 torch.cuda.empty_cache()
+                profiler.stop("dit_offload_cpu", t0)
+            t0 = profiler.start()
             with VAE_patch_parallel():
                 videos = self.vae.decode(x0)
+            profiler.stop("vae_decode", t0)
 
         del noise, latent
         del sample_scheduler
@@ -407,9 +491,16 @@ class WanI2V:
             self.model.freqs_list = None
 
         if offload_model:
+            t0 = profiler.start()
             gc.collect()
             torch.cuda.synchronize()
+            profiler.stop("post_gc_sync", t0)
         if dist.is_initialized():
+            t0 = profiler.start()
             dist.barrier()
+            profiler.stop("final_barrier", t0)
+
+        profiler.stop("request_total", total_start)
+        profiler.report()
 
         return videos[0] if self.rank == 0 else None

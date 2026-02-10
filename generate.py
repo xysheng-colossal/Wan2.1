@@ -128,6 +128,12 @@ def _parse_args():
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage."
     )
     parser.add_argument(
+        "--profile_stage",
+        action="store_true",
+        default=False,
+        help="Print detailed server-side stage timing instead of using offline profile traces.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -433,7 +439,8 @@ def generate(args):
             sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            profile_stage=False)
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -466,7 +473,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            profile_stage=args.profile_stage)
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
@@ -557,7 +565,8 @@ def generate(args):
             sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            profile_stage=False)
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -591,7 +600,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            profile_stage=args.profile_stage)
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
