@@ -128,6 +128,25 @@ def _parse_args():
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage."
     )
     parser.add_argument(
+        "--profile_stage",
+        action="store_true",
+        default=False,
+        help="Print detailed server-side stage timing instead of using offline profile traces.",
+    )
+    parser.add_argument(
+        "--perf_logic",
+        type=str,
+        default="optimized",
+        choices=["legacy", "optimized"],
+        help="Select inference logic for A/B perf comparison.",
+    )
+    parser.add_argument(
+        "--serialize_comm",
+        action="store_true",
+        default=False,
+        help="Enable lightweight serialization on FSDP all-gather scheduling only.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -275,6 +294,24 @@ def _init_logging(rank):
         logging.basicConfig(level=logging.ERROR)
 
 
+def _set_transformer_rainfusion_config(transformer, dit_fsdp, rainfusion_config):
+    if dit_fsdp:
+        transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
+    else:
+        transformer.rainfusion_config = rainfusion_config
+
+
+def _attach_cache_to_transformer(transformer, dit_fsdp, cache, args):
+    if dit_fsdp:
+        for block in transformer._fsdp_wrapped_module.blocks:
+            block._fsdp_wrapped_module.cache = cache
+            block._fsdp_wrapped_module.args = args
+    else:
+        for block in transformer.blocks:
+            block.cache = cache
+            block.args = args
+
+
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -341,6 +378,7 @@ def generate(args):
 
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
+    use_legacy_perf = args.perf_logic == "legacy"
 
     if dist.is_initialized():
         base_seed = [args.base_seed] if rank == 0 else [None]
@@ -392,15 +430,16 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_t2v.model
 
         if args.use_rainfusion:
-            if args.dit_fsdp:
-                transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
-            else:
-                transformer.rainfusion_config = rainfusion_config
+            _set_transformer_rainfusion_config(
+                transformer, args.dit_fsdp, rainfusion_config
+            )
 
         if args.tp_size > 1:
             logging.info("Initializing tensor parallel...")
@@ -414,26 +453,34 @@ def generate(args):
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
-        if args.dit_fsdp:
-            for block in transformer._fsdp_wrapped_module.blocks:
-                block._fsdp_wrapped_module.cache = cache
-                block._fsdp_wrapped_module.args = args
-        else:
-            for block in transformer.blocks:
-                block.cache = cache
-                block.args = args
+        _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
-        logging.info(f"Warm up 2 steps...")
-        video = wan_t2v.generate(
-            args.prompt,
+        t2v_generate_kwargs = dict(
+            input_prompt=args.prompt,
             size=SIZE_CONFIGS[args.size],
             frame_num=args.frame_num,
             shift=args.sample_shift,
             sample_solver=args.sample_solver,
-            sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            legacy_model_to_each_step=use_legacy_perf,
+        )
+
+        logging.info(f"Warm up 2 steps...")
+        video = wan_t2v.generate(
+            t2v_generate_kwargs["input_prompt"],
+            size=t2v_generate_kwargs["size"],
+            frame_num=t2v_generate_kwargs["frame_num"],
+            shift=t2v_generate_kwargs["shift"],
+            sample_solver=t2v_generate_kwargs["sample_solver"],
+            sampling_steps=2,
+            guide_scale=t2v_generate_kwargs["guide_scale"],
+            seed=t2v_generate_kwargs["seed"],
+            offload_model=t2v_generate_kwargs["offload_model"],
+            profile_stage=False,
+            legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+        )
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -445,28 +492,24 @@ def generate(args):
                 step_end=args.end_step
             )
             cache = CacheAgent(config)
-            if args.dit_fsdp:
-                for block in transformer._fsdp_wrapped_module.blocks:
-                    block._fsdp_wrapped_module.cache = cache
-                    block._fsdp_wrapped_module.args = args
-            else:
-                for block in transformer.blocks:
-                    block.cache = cache
-                    block.args = args
+            _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info(f"Generating video ...")
         stream.synchronize()
         begin = time.time()
         video = wan_t2v.generate(
-            args.prompt,
-            size=SIZE_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
+            t2v_generate_kwargs["input_prompt"],
+            size=t2v_generate_kwargs["size"],
+            frame_num=t2v_generate_kwargs["frame_num"],
+            shift=t2v_generate_kwargs["shift"],
+            sample_solver=t2v_generate_kwargs["sample_solver"],
             sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+            guide_scale=t2v_generate_kwargs["guide_scale"],
+            seed=t2v_generate_kwargs["seed"],
+            offload_model=t2v_generate_kwargs["offload_model"],
+            profile_stage=args.profile_stage,
+            legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+        )
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
@@ -515,15 +558,16 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_i2v.model
 
         if args.use_rainfusion:
-            if args.dit_fsdp:
-                transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
-            else:
-                transformer.rainfusion_config = rainfusion_config
+            _set_transformer_rainfusion_config(
+                transformer, args.dit_fsdp, rainfusion_config
+            )
 
         if args.tp_size > 1:
             logging.info("Initializing tensor parallel...")
@@ -537,27 +581,34 @@ def generate(args):
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
-        if args.dit_fsdp:
-            for block in transformer._fsdp_wrapped_module.blocks:
-                block._fsdp_wrapped_module.cache = cache
-                block._fsdp_wrapped_module.args = args
-        else:
-            for block in transformer.blocks:
-                block.cache = cache
-                block.args = args
+        _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
-        logging.info(f"Warm up 2 steps...")
-        video = wan_i2v.generate(
-            args.prompt,
-            img,
+        i2v_generate_kwargs = dict(
+            input_prompt=args.prompt,
+            image=img,
             max_area=MAX_AREA_CONFIGS[args.size],
             frame_num=args.frame_num,
             shift=args.sample_shift,
             sample_solver=args.sample_solver,
-            sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+        )
+
+        logging.info(f"Warm up 2 steps...")
+        video = wan_i2v.generate(
+            i2v_generate_kwargs["input_prompt"],
+            i2v_generate_kwargs["image"],
+            max_area=i2v_generate_kwargs["max_area"],
+            frame_num=i2v_generate_kwargs["frame_num"],
+            shift=i2v_generate_kwargs["shift"],
+            sample_solver=i2v_generate_kwargs["sample_solver"],
+            sampling_steps=2,
+            guide_scale=i2v_generate_kwargs["guide_scale"],
+            seed=i2v_generate_kwargs["seed"],
+            offload_model=i2v_generate_kwargs["offload_model"],
+            profile_stage=False,
+        )
 
         if args.use_attentioncache:
             config = CacheConfig(
@@ -569,29 +620,25 @@ def generate(args):
                 step_end=args.end_step
             )
             cache = CacheAgent(config)
-            if args.dit_fsdp:
-                for block in transformer._fsdp_wrapped_module.blocks:
-                    block._fsdp_wrapped_module.cache = cache
-                    block._fsdp_wrapped_module.args = args
-            else:
-                for block in transformer.blocks:
-                    block.cache = cache
-                    block.args = args
+            _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info("Generating video ...")
         stream.synchronize()
         begin = time.time()
         video = wan_i2v.generate(
-            args.prompt,
-            img,
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
+            i2v_generate_kwargs["input_prompt"],
+            i2v_generate_kwargs["image"],
+            max_area=i2v_generate_kwargs["max_area"],
+            frame_num=i2v_generate_kwargs["frame_num"],
+            shift=i2v_generate_kwargs["shift"],
+            sample_solver=i2v_generate_kwargs["sample_solver"],
             sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+            guide_scale=i2v_generate_kwargs["guide_scale"],
+            seed=i2v_generate_kwargs["seed"],
+            offload_model=i2v_generate_kwargs["offload_model"],
+            profile_stage=args.profile_stage,
+        )
+
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
