@@ -195,7 +195,12 @@ def usp_attn_forward(self,
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
 
-    x = xFuserLongContextAttention(args, rainfusion_config=rainfusion_config)(
+    if not hasattr(self, "_long_ctx_attn") or self._long_ctx_attn is None:
+        self._long_ctx_attn = xFuserLongContextAttention(
+            args, rainfusion_config=rainfusion_config
+        )
+
+    x = self._long_ctx_attn(
         None,
         query=half(q),
         key=half(k),
