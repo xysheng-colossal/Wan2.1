@@ -77,7 +77,14 @@ def _get_a2a_comm_stream():
     return stream
 
 
-def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_event_gate):
+def _all_to_all_with_event_gate(
+    input_,
+    scatter_idx,
+    gather_idx,
+    group,
+    enable_event_gate,
+    record_as_last_a2a=False,
+):
     if not enable_event_gate:
         output = all_to_all_4D(
             input_=input_,
@@ -85,7 +92,8 @@ def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_e
             gather_idx=gather_idx,
             group=group,
         )
-        record_last_a2a_done_event()
+        if record_as_last_a2a:
+            record_last_a2a_done_event()
         return output
 
     device_api = _get_device_api()
@@ -97,7 +105,8 @@ def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_e
             gather_idx=gather_idx,
             group=group,
         )
-        record_last_a2a_done_event()
+        if record_as_last_a2a:
+            record_last_a2a_done_event()
         return output
 
     current_stream = device_api.current_stream()
@@ -114,7 +123,8 @@ def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_e
         )
         done_event.record(comm_stream)
     current_stream.wait_event(done_event)
-    record_last_a2a_done_event()
+    if record_as_last_a2a:
+        record_last_a2a_done_event()
     return output
 
 class xFuserLongContextAttention(LongContextAttention):
@@ -267,6 +277,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 gather_idx=1,
                 group=self.ulysses_pg,
                 enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
             )
             profile_stop("qkv_all_to_all", t0)
 
@@ -287,6 +298,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 gather_idx=1,
                 group=self.ulysses_pg,
                 enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
             )
             profile_stop("q_all_to_all", t0)
 
@@ -298,6 +310,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 gather_idx=1,
                 group=self.ulysses_pg,
                 enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
             )
             profile_stop("k_all_to_all", t0)
 
@@ -309,6 +322,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 gather_idx=1,
                 group=self.ulysses_pg,
                 enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
             )
             profile_stop("v_all_to_all", t0)
 
@@ -381,6 +395,7 @@ class xFuserLongContextAttention(LongContextAttention):
             gather_idx=2,
             group=self.ulysses_pg,
             enable_event_gate=a2a_event_gate_enabled,
+            record_as_last_a2a=True,
         )
         profile_stop("out_all_to_all", t0)
         profile_stop("attn_forward_total", total_start)
