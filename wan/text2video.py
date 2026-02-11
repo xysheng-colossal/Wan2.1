@@ -365,21 +365,6 @@ class WanT2V:
                 self.model.to(self.device)
                 profiler.stop("dit_to_device", t0)
 
-                # Context tensors are static through denoising steps.
-                # Precompute text embedding once and reuse in each step.
-                t0 = profiler.start()
-                if get_classifier_free_guidance_world_size() == 2:
-                    arg_all['context_emb'] = self.model.encode_text_context(arg_all['context'])
-                elif cfg_fused_forward:
-                    fused_context = [context[0], context_null[0]]
-                    fused_context_emb = self.model.encode_text_context(fused_context)
-                    arg_c['context_emb'] = fused_context_emb[:1]
-                    arg_null['context_emb'] = fused_context_emb[1:]
-                else:
-                    arg_c['context_emb'] = self.model.encode_text_context(context)
-                    arg_null['context_emb'] = self.model.encode_text_context(context_null)
-                profiler.stop("text_embed_prepare", t0)
-
             denoise_loop_start = profiler.start()
             for t_idx, t in enumerate(tqdm(timesteps, disable=self.rank != 0)):
                 step_start = profiler.start()
@@ -467,9 +452,9 @@ class WanT2V:
         del sample_scheduler
 
         if self.dit_fsdp:
-            self.model._fsdp_wrapped_module.freqs_list = None
+            self.model._fsdp_wrapped_module.clear_runtime_caches()
         else:
-            self.model.freqs_list = None
+            self.model.clear_runtime_caches()
             
         if offload_model:
             t0 = profiler.start()

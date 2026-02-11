@@ -512,6 +512,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.init_weights()
 
         self.freqs_list = None
+        self._context_cache = {}
 
         self.rainfusion_config = None
 
@@ -594,7 +595,15 @@ class WanModel(ModelMixin, ConfigMixin):
         # context
         context_lens = None
         if context_emb is None:
-            context = self.encode_text_context(context)
+            context_key = self.build_context_cache_key(context)
+            context_emb_cached = self._context_cache.get(context_key)
+            if context_emb_cached is None:
+                context_emb_cached = self.encode_text_context(context)
+                # Keep cache tiny to avoid long-lived stale tensors.
+                if len(self._context_cache) >= 4:
+                    self._context_cache.clear()
+                self._context_cache[context_key] = context_emb_cached
+            context = context_emb_cached
         else:
             context = context_emb
 
@@ -657,6 +666,17 @@ class WanModel(ModelMixin, ConfigMixin):
                 for u in context
             ])
         )
+
+    @staticmethod
+    def build_context_cache_key(context):
+        return tuple(
+            (int(u.data_ptr()), tuple(u.shape), str(u.dtype), str(u.device))
+            for u in context
+        )
+
+    def clear_runtime_caches(self):
+        self.freqs_list = None
+        self._context_cache.clear()
 
     def unpatchify(self, x, grid_sizes):
         r"""
