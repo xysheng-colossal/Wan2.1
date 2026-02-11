@@ -172,6 +172,12 @@ def _parse_args():
         help="Enable lightweight serialization on FSDP all-gather scheduling only.",
     )
     parser.add_argument(
+        "--cfg_fused_forward",
+        action="store_true",
+        default=False,
+        help="For cfg_size=1, fuse cond/uncond into one DiT forward (batch=2) for perf A/B.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -526,6 +532,7 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model,
             legacy_model_to_each_step=use_legacy_perf,
+            cfg_fused_forward=args.cfg_fused_forward,
         )
         attn_profile_file = args.profile_attn_file or args.profile_stage_file
 
@@ -545,6 +552,7 @@ def generate(args):
             profile_attn=False,
             profile_attn_file=None,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+            cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
         )
 
         if args.use_attentioncache:
@@ -577,6 +585,7 @@ def generate(args):
             profile_attn=args.profile_attn,
             profile_attn_file=attn_profile_file,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+            cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
         )
         stream.synchronize()
         end = time.time()
