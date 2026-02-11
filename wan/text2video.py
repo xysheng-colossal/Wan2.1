@@ -173,7 +173,8 @@ class WanT2V:
                  profile_block=False,
                  profile_block_file=None,
                  legacy_model_to_each_step=False,
-                 cfg_fused_forward=False):
+                 cfg_fused_forward=False,
+                 cache_cross_kv=False):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -214,6 +215,8 @@ class WanT2V:
                 If True, keeps legacy behavior of calling `model.to(device)` at each denoise step
             cfg_fused_forward (`bool`, *optional*, defaults to False):
                 If True and cfg_size=1, fuse cond/uncond into a single DiT forward with batch=2
+            cache_cross_kv (`bool`, *optional*, defaults to False):
+                If True, cache cross-attention K/V projections across denoise steps for static prompt context
 
         Returns:
             torch.Tensor:
@@ -238,6 +241,7 @@ class WanT2V:
                 "sample_solver": sample_solver,
                 "legacy_model_to_each_step": int(bool(legacy_model_to_each_step)),
                 "cfg_fused_forward": int(bool(cfg_fused_forward)),
+                "cache_cross_kv": int(bool(cache_cross_kv)),
             },
         )
         configure_attention_profiler(
@@ -379,7 +383,7 @@ class WanT2V:
                 if get_classifier_free_guidance_world_size() == 2:
                     t0 = profiler.start()
                     noise_pred = self.model(
-                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0]
+                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
                     profiler.stop("dit_forward", t0, per_step=True)
 
                     t0 = profiler.start()
@@ -401,18 +405,19 @@ class WanT2V:
                             t_idx=t_idx,
                             block_profiler=block_profiler,
                             context_emb=fused_context_emb,
+                            cache_cross_kv=cache_cross_kv,
                         )
                         noise_pred_cond, noise_pred_uncond = noise_pred_pair
                         profiler.stop("dit_forward_cfg_fused", t0, per_step=True)
                     else:
                         t0 = profiler.start()
                         noise_pred_cond = self.model(
-                            latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0]
+                            latent_model_input, t=timestep, **arg_c, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
                         profiler.stop("dit_forward_cond", t0, per_step=True)
 
                         t0 = profiler.start()
                         noise_pred_uncond = self.model(
-                            latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0]
+                            latent_model_input, t=timestep, **arg_null, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
                         profiler.stop("dit_forward_uncond", t0, per_step=True)
 
                 t0 = profiler.start()

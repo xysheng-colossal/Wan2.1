@@ -190,6 +190,12 @@ def _parse_args():
         help="For cfg_size=1, fuse cond/uncond into one DiT forward (batch=2) for perf A/B.",
     )
     parser.add_argument(
+        "--cache_cross_kv",
+        action="store_true",
+        default=False,
+        help="Cache cross-attention K/V projections across denoise steps.",
+    )
+    parser.add_argument(
         "--cfg_size",
         type=int,
         default=1,
@@ -551,6 +557,7 @@ def generate(args):
             offload_model=args.offload_model,
             legacy_model_to_each_step=use_legacy_perf,
             cfg_fused_forward=args.cfg_fused_forward,
+            cache_cross_kv=args.cache_cross_kv,
         )
         attn_profile_file = args.profile_attn_file or args.profile_stage_file
         block_profile_file = args.profile_block_file or args.profile_stage_file
@@ -574,6 +581,7 @@ def generate(args):
             profile_block_file=None,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
             cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
+            cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
         )
 
         if args.use_attentioncache:
@@ -609,6 +617,7 @@ def generate(args):
             profile_block_file=block_profile_file,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
             cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
+            cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
         )
         stream.synchronize()
         end = time.time()

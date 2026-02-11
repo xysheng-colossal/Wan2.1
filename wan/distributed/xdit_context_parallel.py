@@ -56,6 +56,7 @@ def usp_dit_forward(
     t_idx=None,
     block_profiler=None,
     context_emb=None,
+    cache_cross_kv=False,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
@@ -165,6 +166,7 @@ def usp_dit_forward(
         context_lens=context_lens,
         rainfusion_config=self.rainfusion_config,
         t_idx=t_idx,
+        cache_cross_kv=cache_cross_kv,
     )
 
     for block_idx, block in enumerate(self.blocks):

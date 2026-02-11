@@ -170,7 +170,17 @@ class WanSelfAttention(nn.Module):
 
 class WanT2VCrossAttention(WanSelfAttention):
 
-    def forward(self, x, context, context_lens):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._kv_cache = {}
+
+    def _build_kv_cache_key(self, context):
+        return (int(context.data_ptr()), tuple(context.shape), str(context.dtype), str(context.device))
+
+    def clear_runtime_cache(self):
+        self._kv_cache.clear()
+
+    def forward(self, x, context, context_lens, cache_kv=False):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -181,8 +191,18 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        k = self.norm_k(self.k(context)).view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
+        kv_cache = None
+        if cache_kv:
+            kv_cache = self._kv_cache.get(self._build_kv_cache_key(context))
+        if kv_cache is None:
+            k = self.norm_k(self.k(context)).view(b, -1, n, d)
+            v = self.v(context).view(b, -1, n, d)
+            if cache_kv:
+                if len(self._kv_cache) >= 2:
+                    self._kv_cache.clear()
+                self._kv_cache[self._build_kv_cache_key(context)] = (k, v)
+        else:
+            k, v = kv_cache
 
         # compute attention
         x = attention(q, k, v, k_lens=context_lens)
@@ -207,8 +227,15 @@ class WanI2VCrossAttention(WanSelfAttention):
         self.v_img = nn.Linear(dim, dim)
         # self.alpha = nn.Parameter(torch.zeros((1, )))
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self._kv_cache = {}
 
-    def forward(self, x, context, context_lens):
+    def _build_kv_cache_key(self, context):
+        return (int(context.data_ptr()), tuple(context.shape), str(context.dtype), str(context.device))
+
+    def clear_runtime_cache(self):
+        self._kv_cache.clear()
+
+    def forward(self, x, context, context_lens, cache_kv=False):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -221,10 +248,20 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        k = self.norm_k(self.k(context)).view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-        k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
-        v_img = self.v_img(context_img).view(b, -1, n, d)
+        kv_cache = None
+        if cache_kv:
+            kv_cache = self._kv_cache.get(self._build_kv_cache_key(context))
+        if kv_cache is None:
+            k = self.norm_k(self.k(context)).view(b, -1, n, d)
+            v = self.v(context).view(b, -1, n, d)
+            k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
+            v_img = self.v_img(context_img).view(b, -1, n, d)
+            if cache_kv:
+                if len(self._kv_cache) >= 2:
+                    self._kv_cache.clear()
+                self._kv_cache[self._build_kv_cache_key(context)] = (k, v, k_img, v_img)
+        else:
+            k, v, k_img, v_img = kv_cache
         img_x = attention(q, k_img, v_img, k_lens=None)
         # compute attention
         x = attention(q, k, v, k_lens=context_lens)
@@ -303,6 +340,7 @@ class WanAttentionBlock(nn.Module):
         context_lens,
         rainfusion_config,
         t_idx,
+        cache_cross_kv=False,
     ):
         r"""
         Args:
@@ -334,7 +372,7 @@ class WanAttentionBlock(nn.Module):
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
+            x = x + self.cross_attn(self.norm3(x), context, context_lens, cache_kv=cache_cross_kv)
             y = self.ffn(self.norm2(x, 1 + e[4], e[3]))
             # y = self.ffn(self.norm2(x) * (1 + e[4]) + e[3])
             # with amp.autocast(dtype=torch.float32):
@@ -343,6 +381,10 @@ class WanAttentionBlock(nn.Module):
 
         x = cross_attn_ffn(x, context, context_lens, e)
         return x
+
+    def clear_runtime_cache(self):
+        if hasattr(self.cross_attn, "clear_runtime_cache"):
+            self.cross_attn.clear_runtime_cache()
 
 
 class Head(nn.Module):
@@ -527,6 +569,7 @@ class WanModel(ModelMixin, ConfigMixin):
         t_idx=None,
         block_profiler=None,
         context_emb=None,
+        cache_cross_kv=False,
     ):
         r"""
         Forward pass through the diffusion model
@@ -644,6 +687,7 @@ class WanModel(ModelMixin, ConfigMixin):
             context_lens=context_lens,
             rainfusion_config=self.rainfusion_config,
             t_idx=t_idx,
+            cache_cross_kv=cache_cross_kv,
         )
 
         for block_idx, block in enumerate(self.blocks):
@@ -677,6 +721,9 @@ class WanModel(ModelMixin, ConfigMixin):
     def clear_runtime_caches(self):
         self.freqs_list = None
         self._context_cache.clear()
+        for block in self.blocks:
+            if hasattr(block, "clear_runtime_cache"):
+                block.clear_runtime_cache()
 
     def unpatchify(self, x, grid_sizes):
         r"""
