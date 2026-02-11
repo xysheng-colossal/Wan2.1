@@ -39,12 +39,8 @@ def shard_model(
     serialize_communication=False,
 ):
     if sharding_strategy is None:
-        # Optimized inference defaults to SHARD_GRAD_OP. Legacy restores FULL_SHARD.
-        sharding_strategy = (
-            ShardingStrategy.FULL_SHARD
-            if use_legacy_behavior
-            else ShardingStrategy.SHARD_GRAD_OP
-        )
+        # Keep FULL_SHARD as the default strategy unless explicitly overridden.
+        sharding_strategy = ShardingStrategy.FULL_SHARD
     if sync_module_states is None:
         # Legacy default follows previous behavior for DiT FSDP construction.
         sync_module_states = True if use_legacy_behavior else False
