@@ -61,10 +61,23 @@ def shard_model(
         device_id=device_id,
         sync_module_states=sync_module_states,
     )
+    fsdp_signature = inspect.signature(FSDP.__init__)
+    supported_args = fsdp_signature.parameters
+
+    reshard_env = os.getenv("WAN_FSDP_RESHARD_AFTER_FORWARD", "").strip().lower()
+    if "reshard_after_forward" in supported_args and reshard_env:
+        if reshard_env in ("0", "false", "off", "no"):
+            fsdp_kwargs["reshard_after_forward"] = False
+        elif reshard_env in ("1", "true", "on", "yes"):
+            fsdp_kwargs["reshard_after_forward"] = True
+        else:
+            raise ValueError(
+                "WAN_FSDP_RESHARD_AFTER_FORWARD must be one of "
+                "{0,1,false,true,off,on,no,yes}"
+            )
+
     if serialize_communication:
         # Serialize FSDP all-gather scheduling where available.
-        fsdp_signature = inspect.signature(FSDP.__init__)
-        supported_args = fsdp_signature.parameters
         if "forward_prefetch" in supported_args:
             fsdp_kwargs["forward_prefetch"] = False
         if "limit_all_gathers" in supported_args:
