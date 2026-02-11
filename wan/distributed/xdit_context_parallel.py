@@ -54,6 +54,7 @@ def usp_dit_forward(
     clip_fea=None,
     y=None,
     t_idx=None,
+    block_profiler=None,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
@@ -155,8 +156,11 @@ def usp_dit_forward(
         t_idx=t_idx,
     )
 
-    for block in self.blocks:
+    for block_idx, block in enumerate(self.blocks):
+        t0 = block_profiler.start() if block_profiler is not None else None
         x = block(x, **kwargs)
+        if block_profiler is not None:
+            block_profiler.stop(block_idx, t0)
 
     # head
     x = self.head(x, e)
