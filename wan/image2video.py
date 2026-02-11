@@ -31,6 +31,7 @@ from .utils.attention_profile import (
 )
 from .utils.block_profile import (
     configure_block_profiler,
+    get_block_profiler,
     report_block_profiler,
 )
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
@@ -267,6 +268,7 @@ class WanI2V:
             name="I2V",
             output_file=profile_block_file,
         )
+        block_profiler = get_block_profiler()
         total_start = profiler.start()
 
         t0 = profiler.start()
@@ -428,6 +430,7 @@ class WanI2V:
                 'clip_fea': clip_context,
                 'seq_len': max_seq_len,
                 'y': [y],
+                'block_profiler': block_profiler,
             }
 
             arg_null = {
@@ -435,6 +438,7 @@ class WanI2V:
                 'clip_fea': clip_context,
                 'seq_len': max_seq_len,
                 'y': [y],
+                'block_profiler': block_profiler,
             }
 
             arg_all = {
@@ -442,6 +446,7 @@ class WanI2V:
                 'clip_fea': clip_context,
                 'seq_len': max_seq_len,
                 'y': [y],
+                'block_profiler': block_profiler,
             }
 
             if offload_model:

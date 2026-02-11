@@ -28,6 +28,7 @@ from .utils.attention_profile import (
 )
 from .utils.block_profile import (
     configure_block_profiler,
+    get_block_profiler,
     report_block_profiler,
 )
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
@@ -253,6 +254,7 @@ class WanT2V:
             name="T2V",
             output_file=profile_block_file,
         )
+        block_profiler = get_block_profiler()
         total_start = profiler.start()
 
         # preprocess
@@ -349,11 +351,12 @@ class WanT2V:
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len}
-            arg_null = {'context': context_null, 'seq_len': seq_len}
+            arg_c = {'context': context, 'seq_len': seq_len, 'block_profiler': block_profiler}
+            arg_null = {'context': context_null, 'seq_len': seq_len, 'block_profiler': block_profiler}
             arg_all = {
                 'context': context if get_classifier_free_guidance_rank()==0 else context_null,
-                'seq_len': seq_len
+                'seq_len': seq_len,
+                'block_profiler': block_profiler,
             }
 
             if not legacy_model_to_each_step:
@@ -392,6 +395,7 @@ class WanT2V:
                             context=[context[0], context_null[0]],
                             seq_len=seq_len,
                             t_idx=t_idx,
+                            block_profiler=block_profiler,
                         )
                         noise_pred_cond, noise_pred_uncond = noise_pred_pair
                         profiler.stop("dit_forward_cfg_fused", t0, per_step=True)
