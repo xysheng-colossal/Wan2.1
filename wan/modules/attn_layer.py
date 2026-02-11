@@ -129,7 +129,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
         def profile_stop(stage_name, start_time):
             if profiler is not None:
-                profiler.stop(stage_name, start_time)
+                profiler.stop(stage_name, start_time, step_idx=t_idx)
 
         total_start = profile_start()
 

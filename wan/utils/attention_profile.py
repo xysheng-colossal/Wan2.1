@@ -18,9 +18,11 @@ class AttentionProfiler:
         self.rank = rank
         self.name = name
         self.output_file = output_file
+        self.top_k = 5
         self.stage_totals_ms = defaultdict(float)
         self.stage_counts = defaultdict(int)
         self.stage_max_call_ms = defaultdict(float)
+        self.step_stage_totals_ms = defaultdict(lambda: defaultdict(float))
 
     def _sync(self):
         if not self.enabled:
@@ -36,7 +38,7 @@ class AttentionProfiler:
         self._sync()
         return time.perf_counter()
 
-    def stop(self, stage_name, start_time):
+    def stop(self, stage_name, start_time, step_idx=None):
         if not self.enabled or start_time is None:
             return 0.0
         self._sync()
@@ -45,6 +47,13 @@ class AttentionProfiler:
         self.stage_counts[stage_name] += 1
         if elapsed_ms > self.stage_max_call_ms[stage_name]:
             self.stage_max_call_ms[stage_name] = elapsed_ms
+        if step_idx is not None:
+            try:
+                step_id = int(step_idx)
+                if step_id >= 0:
+                    self.step_stage_totals_ms[stage_name][step_id] += elapsed_ms
+            except Exception:
+                pass
         return elapsed_ms
 
     def _reduce_stage(self, total_ms, count, max_call_ms):
@@ -71,6 +80,43 @@ class AttentionProfiler:
             count_tensor.item(),
             max_call_tensor.item(),
         )
+
+    def _reduce_series(self, values):
+        if len(values) == 0:
+            return [], []
+        if not dist.is_initialized():
+            return values, values
+
+        world_size = dist.get_world_size()
+        value_tensor = torch.tensor(values, dtype=torch.float32, device=self.device)
+        max_tensor = value_tensor.clone()
+        sum_tensor = value_tensor.clone()
+        dist.all_reduce(max_tensor, op=dist.ReduceOp.MAX)
+        dist.all_reduce(sum_tensor, op=dist.ReduceOp.SUM)
+        avg_tensor = sum_tensor / world_size
+        return max_tensor.tolist(), avg_tensor.tolist()
+
+    @staticmethod
+    def _percentile(values, percentile):
+        if len(values) == 0:
+            return 0.0
+        sorted_values = sorted(values)
+        idx = int((len(sorted_values) - 1) * percentile)
+        return sorted_values[idx]
+
+    @staticmethod
+    def _dense_step_series(step_map):
+        if not step_map:
+            return []
+        max_step = int(max(step_map.keys()))
+        if max_step < 0:
+            return []
+        dense = [0.0] * (max_step + 1)
+        for step_idx, value in step_map.items():
+            if step_idx < 0:
+                continue
+            dense[int(step_idx)] = float(value)
+        return dense
 
     def report(self):
         if not self.enabled or not self.stage_totals_ms:
@@ -107,7 +153,30 @@ class AttentionProfiler:
                     f"max_ratio={max_ratio:.2%}, avg_ratio={avg_ratio:.2%}"
                 )
 
-        self._append_report_file(summaries, ratio_summaries)
+        step_summaries = self._build_step_summaries()
+        if self.rank == 0 and step_summaries:
+            logging.info(f"[{self.name} AttnProfile] ==== Attention Per-Step Breakdown (ms, max_rank) ====")
+            for (
+                metric_name,
+                avg_ms,
+                p50_ms,
+                p90_ms,
+                min_ms,
+                max_ms,
+                avg_rank_avg_ms,
+                slowest,
+            ) in step_summaries:
+                logging.info(
+                    f"[{self.name} AttnProfile] {metric_name}: "
+                    f"avg={avg_ms:.3f}, p50={p50_ms:.3f}, p90={p90_ms:.3f}, "
+                    f"min={min_ms:.3f}, max={max_ms:.3f}, avg_rank_avg={avg_rank_avg_ms:.3f}"
+                )
+                slowest_str = ", ".join([f"step{idx}:{val:.3f}" for idx, val in slowest])
+                logging.info(
+                    f"[{self.name} AttnProfile] {metric_name} slowest {self.top_k}: {slowest_str}"
+                )
+
+        self._append_report_file(summaries, ratio_summaries, step_summaries)
 
     @staticmethod
     def _sum_stage(summary_map, stage_names):
@@ -169,7 +238,66 @@ class AttentionProfiler:
         )
         return ratio_summaries
 
-    def _append_report_file(self, summaries, ratio_summaries):
+    def _build_step_summaries(self):
+        if not self.step_stage_totals_ms:
+            return []
+
+        step_stage_maps = dict(self.step_stage_totals_ms)
+        packed_comm_keys = [
+            "qkv_all_to_all",
+            "kv_ring_k_all_gather",
+            "kv_ring_v_all_gather",
+            "out_all_to_all",
+        ]
+        legacy_comm_keys = [
+            "q_all_to_all",
+            "k_all_to_all",
+            "v_all_to_all",
+            "kv_ring_k_all_gather",
+            "kv_ring_v_all_gather",
+            "out_all_to_all",
+        ]
+        comm_keys = packed_comm_keys if "qkv_all_to_all" in step_stage_maps else legacy_comm_keys
+        comm_step_map = defaultdict(float)
+        for name in comm_keys:
+            step_map = step_stage_maps.get(name)
+            if not step_map:
+                continue
+            for step_idx, value in step_map.items():
+                comm_step_map[int(step_idx)] += float(value)
+        if comm_step_map:
+            step_stage_maps["comm_total"] = comm_step_map
+
+        step_summaries = []
+        for metric_name in sorted(step_stage_maps):
+            dense_values = self._dense_step_series(step_stage_maps[metric_name])
+            if not dense_values:
+                continue
+            max_series, avg_series = self._reduce_series(dense_values)
+            if len(max_series) == 0:
+                continue
+            avg_ms = sum(max_series) / len(max_series)
+            p50_ms = self._percentile(max_series, 0.50)
+            p90_ms = self._percentile(max_series, 0.90)
+            min_ms = min(max_series)
+            max_ms = max(max_series)
+            avg_rank_avg_ms = sum(avg_series) / len(avg_series)
+            slowest = sorted(enumerate(max_series), key=lambda x: x[1], reverse=True)[: self.top_k]
+            step_summaries.append(
+                (
+                    metric_name,
+                    avg_ms,
+                    p50_ms,
+                    p90_ms,
+                    min_ms,
+                    max_ms,
+                    avg_rank_avg_ms,
+                    slowest,
+                )
+            )
+        return step_summaries
+
+    def _append_report_file(self, summaries, ratio_summaries, step_summaries):
         if self.rank != 0 or not self.output_file:
             return
         try:
@@ -190,6 +318,24 @@ class AttentionProfiler:
                     )
                 for key, max_ratio, avg_ratio in ratio_summaries:
                     f.write(f"ATTN_RATIO,{key},{max_ratio:.6f},{avg_ratio:.6f}\n")
+                for (
+                    metric_name,
+                    avg_ms,
+                    p50_ms,
+                    p90_ms,
+                    min_ms,
+                    max_ms,
+                    avg_rank_avg_ms,
+                    slowest,
+                ) in step_summaries:
+                    f.write(
+                        "ATTN_STEP,"
+                        f"{metric_name},"
+                        f"{avg_ms:.3f},{p50_ms:.3f},{p90_ms:.3f},"
+                        f"{min_ms:.3f},{max_ms:.3f},{avg_rank_avg_ms:.3f}\n"
+                    )
+                    slowest_str = ";".join([f"step{idx}:{val:.3f}" for idx, val in slowest])
+                    f.write(f"ATTN_SLOW,{metric_name},{slowest_str}\n")
                 f.write("ATTN_END\n")
         except Exception as exc:
             logging.warning(

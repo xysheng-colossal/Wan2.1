@@ -96,6 +96,7 @@ def parse_attn_runs(lines):
                 "ts": parts[1] if len(parts) > 1 else "",
                 "name": parts[2] if len(parts) > 2 else "",
                 "ratio": {},
+                "step": {},
             }
             continue
         if current is None:
@@ -104,6 +105,15 @@ def parse_attn_runs(lines):
             current["ratio"][parts[1]] = {
                 "max": _to_float(parts[2]),
                 "avg": _to_float(parts[3]),
+            }
+        elif record == "ATTN_STEP" and len(parts) >= 8:
+            current["step"][parts[1]] = {
+                "avg_ms": _to_float(parts[2]),
+                "p50_ms": _to_float(parts[3]),
+                "p90_ms": _to_float(parts[4]),
+                "min_ms": _to_float(parts[5]),
+                "max_ms": _to_float(parts[6]),
+                "avg_rank_avg_ms": _to_float(parts[7]),
             }
         elif record == "ATTN_END":
             runs.append(current)
@@ -170,7 +180,7 @@ def fmt_delta(new_v, old_v):
     return f"{sign}{delta_pct:.2f}%"
 
 
-def summarize_run(run, block_run=None):
+def summarize_run(run, attn_run=None, block_run=None):
     print(f"Run: {run['ts']}  name={run['name']}")
     if run["meta"]:
         meta_text = ", ".join(f"{k}={v}" for k, v in sorted(run["meta"].items()))
@@ -203,6 +213,20 @@ def summarize_run(run, block_run=None):
         for key in sorted(run["perf"]):
             metric = run["perf"][key]
             print(f"  {key}: {metric['value']:.6f} {metric['unit']}")
+
+    if attn_run and attn_run.get("step"):
+        print("Attention step jitter:")
+        for metric_name in ("comm_total", "attn_kernel", "attn_forward_total"):
+            metric = attn_run["step"].get(metric_name)
+            if not metric:
+                continue
+            p50_ms = metric.get("p50_ms", 0.0)
+            p90_ms = metric.get("p90_ms", 0.0)
+            jitter_pct = (p90_ms / p50_ms - 1.0) * 100.0 if p50_ms > 0.0 else 0.0
+            print(
+                f"  {metric_name}: avg={metric['avg_ms']:.3f} ms, "
+                f"p50={p50_ms:.3f} ms, p90={p90_ms:.3f} ms, jitter={jitter_pct:.2f}%"
+            )
 
     if block_run and (block_run.get("top") or block_run.get("blocks")):
         print("Top DiT blocks:")
@@ -295,6 +319,20 @@ def build_suggestions(stage_run, attn_run, block_run):
         if kernel_share < 0.45:
             suggestions.append("Attention kernel占比偏低，可能受pack/通信或其他开销限制，建议检查qkv打包与数据布局。")
 
+        comm_step = attn_run["step"].get("comm_total")
+        kernel_step = attn_run["step"].get("attn_kernel")
+        if comm_step and kernel_step:
+            comm_p50 = comm_step.get("p50_ms", 0.0)
+            comm_p90 = comm_step.get("p90_ms", 0.0)
+            kernel_p50 = kernel_step.get("p50_ms", 0.0)
+            kernel_p90 = kernel_step.get("p90_ms", 0.0)
+            comm_jitter = (comm_p90 / comm_p50 - 1.0) if comm_p50 > 0.0 else 0.0
+            kernel_jitter = (kernel_p90 / kernel_p50 - 1.0) if kernel_p50 > 0.0 else 0.0
+            if comm_jitter > 0.03 and comm_jitter > kernel_jitter * 1.5:
+                suggestions.append(
+                    "检测到Attention通信抖动高于kernel抖动，可能存在collective竞争（如allgather/alltoall重叠）；建议对比serialize_comm并补充collective级trace定位冲突窗口。"
+                )
+
     if block_run and block_run.get("top"):
         top_list = sorted(block_run["top"], key=lambda x: x["rank"])
         if len(top_list) >= 2:
@@ -329,7 +367,7 @@ def main():
     attn_current = attn_runs[-1] if attn_runs else None
     block_current = block_runs[-1] if block_runs else None
 
-    summarize_run(current, block_current)
+    summarize_run(current, attn_current, block_current)
     if previous:
         print_comparison(current, previous)
 
