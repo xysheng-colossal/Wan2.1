@@ -177,9 +177,21 @@ def build_suggestions(stage_run, attn_run):
     suggestions = []
     total = stage_run["total"]
     perf = stage_run["perf"]
+    meta = stage_run.get("meta", {})
     request_total = total.get("request_total", {}).get("max_ms", 0.0)
     if request_total <= 0:
         return suggestions
+
+    cfg_fused_forward = str(meta.get("cfg_fused_forward", "0")) == "1"
+    dit_cond = total.get("dit_forward_cond", {}).get("max_ms", 0.0)
+    dit_uncond = total.get("dit_forward_uncond", {}).get("max_ms", 0.0)
+    if (not cfg_fused_forward) and dit_cond > 0 and dit_uncond > 0:
+        cond_share = dit_cond / request_total
+        uncond_share = dit_uncond / request_total
+        if cond_share > 0.2 and uncond_share > 0.2:
+            suggestions.append(
+                "检测到cond/uncond双前向都是热点，可A/B测试 --cfg_fused_forward 以单次批量前向替代双次前向。"
+            )
 
     cfg_allgather = total.get("cfg_allgather", {}).get("max_ms", 0.0)
     if cfg_allgather / request_total > 0.08:
