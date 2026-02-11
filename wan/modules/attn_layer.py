@@ -33,6 +33,17 @@ def _device_sync_if_needed(enabled):
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 
+
+def _resolve_a2a_fence_mode():
+    raw_mode = os.getenv("WAN_A2A_FENCE", "0").strip().lower()
+    if raw_mode in ("0", "off", "false", ""):
+        return 0, "disabled"
+    if raw_mode in ("1", "pre_qkv", "pre_qkv_only", "light"):
+        return 1, "pre_qkv_only"
+    if raw_mode in ("2", "full", "all"):
+        return 2, "full"
+    return 0, f"invalid({raw_mode})->disabled"
+
 class xFuserLongContextAttention(LongContextAttention):
     ring_impl_type_supported_kv_cache = ["basic"]
 
@@ -144,7 +155,9 @@ class xFuserLongContextAttention(LongContextAttention):
         total_start = profile_start()
 
         use_packed_qkv_a2a = os.getenv("WAN_PACKED_QKV_A2A", "1") != "0"
-        use_a2a_fence = os.getenv("WAN_A2A_FENCE", "0") == "1"
+        a2a_fence_mode, a2a_fence_mode_name = _resolve_a2a_fence_mode()
+        fence_before_qkv = a2a_fence_mode >= 1
+        fence_full = a2a_fence_mode >= 2
         global _QKV_A2A_MODE_LOGGED
         global _A2A_FENCE_MODE_LOGGED
         if not _QKV_A2A_MODE_LOGGED:
@@ -155,12 +168,12 @@ class xFuserLongContextAttention(LongContextAttention):
         if not _A2A_FENCE_MODE_LOGGED:
             if not dist.is_initialized() or dist.get_rank() == 0:
                 logger.info(
-                    f"Attention all_to_all fence: {'enabled' if use_a2a_fence else 'disabled'} "
-                    f"(WAN_A2A_FENCE={'1' if use_a2a_fence else '0'})"
+                    f"Attention all_to_all fence mode: {a2a_fence_mode_name} "
+                    f"(WAN_A2A_FENCE={os.getenv('WAN_A2A_FENCE', '0')})"
                 )
             _A2A_FENCE_MODE_LOGGED = True
         if use_packed_qkv_a2a:
-            _device_sync_if_needed(use_a2a_fence)
+            _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
             qkv = torch.cat([query, key, value], dim=-1)
             profile_stop("qkv_concat", t0)
@@ -183,7 +196,7 @@ class xFuserLongContextAttention(LongContextAttention):
             )
             profile_stop("qkv_split", t0)
         else:
-            _device_sync_if_needed(use_a2a_fence)
+            _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
             query_layer = all_to_all_4D(
                 input_=query,
@@ -193,7 +206,7 @@ class xFuserLongContextAttention(LongContextAttention):
             )
             profile_stop("q_all_to_all", t0)
 
-            _device_sync_if_needed(use_a2a_fence)
+            _device_sync_if_needed(fence_full)
             t0 = profile_start()
             key_layer = all_to_all_4D(
                 input_=key,
@@ -203,7 +216,7 @@ class xFuserLongContextAttention(LongContextAttention):
             )
             profile_stop("k_all_to_all", t0)
 
-            _device_sync_if_needed(use_a2a_fence)
+            _device_sync_if_needed(fence_full)
             t0 = profile_start()
             value_layer = all_to_all_4D(
                 input_=value,
@@ -274,7 +287,7 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        _device_sync_if_needed(use_a2a_fence)
+        _device_sync_if_needed(fence_full)
         t0 = profile_start()
         output = all_to_all_4D(
             input_=context_layer,
