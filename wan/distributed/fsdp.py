@@ -88,6 +88,30 @@ def _maybe_group_blocks_for_fsdp(model):
     model.blocks = nn.ModuleList(grouped_blocks)
 
 
+def _resolve_wrap_mode():
+    raw = os.getenv("WAN_FSDP_WRAP_MODE", "").strip().lower()
+    if raw in ("", "block", "block_only"):
+        return "block"
+    if raw in ("ffn", "ffn_only"):
+        return "ffn_only"
+    raise ValueError(
+        "WAN_FSDP_WRAP_MODE must be one of {block, ffn_only}, "
+        f"but got {raw}"
+    )
+
+
+def _collect_wrap_targets(model, wrap_mode):
+    if not hasattr(model, "blocks"):
+        return []
+
+    if wrap_mode == "ffn_only" and _is_wan_dit_model(model):
+        targets = [block.ffn for block in model.blocks if hasattr(block, "ffn")]
+        if len(targets) > 0:
+            return targets
+
+    return list(model.blocks)
+
+
 def _register_fsdp_allgather_wait_a2a_hooks(model):
     if not is_fsdp_allgather_wait_a2a_enabled():
         return
@@ -141,13 +165,31 @@ def shard_model(
         sync_module_states = True if use_legacy_behavior else False
 
     sharding_strategy = _resolve_sharding_strategy(sharding_strategy)
-    _maybe_group_blocks_for_fsdp(model)
+    requested_wrap_mode = _resolve_wrap_mode()
+    if requested_wrap_mode == "block":
+        _maybe_group_blocks_for_fsdp(model)
+    elif requested_wrap_mode == "ffn_only" and not _is_wan_dit_model(model):
+        # Keep non-Wan models on block wrapping to avoid affecting T5 behavior.
+        requested_wrap_mode = "block"
+
+    wrap_targets = _collect_wrap_targets(model, requested_wrap_mode)
+    if len(wrap_targets) == 0:
+        raise ValueError("No FSDP wrap targets found for model.")
+
+    if (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
+        logger.info(
+            "FSDP wrap mode: %s (targets=%d)",
+            requested_wrap_mode,
+            len(wrap_targets),
+        )
+
     fsdp_kwargs = dict(
         module=model,
         process_group=process_group,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=partial(
-            lambda_auto_wrap_policy, lambda_fn=lambda m: m in model.blocks
+            lambda_auto_wrap_policy,
+            lambda_fn=lambda m: any(m is target for target in wrap_targets),
         ),
         mixed_precision=MixedPrecision(
             param_dtype=param_dtype,
