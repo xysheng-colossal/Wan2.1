@@ -470,6 +470,12 @@ def generate(args):
         "grid_size": None,
         "atten_mask_all": None
     }
+    if args.use_rainfusion and args.cfg_fused_forward:
+        logging.warning(
+            "`--use_rainfusion` is currently incompatible with `--cfg_fused_forward`; "
+            "falling back to non-fused CFG forward."
+        )
+        args.cfg_fused_forward = False
 
     if "t2v" in args.task or "t2i" in args.task:
         if args.prompt is None:
