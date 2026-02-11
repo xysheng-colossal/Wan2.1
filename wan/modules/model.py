@@ -525,6 +525,7 @@ class WanModel(ModelMixin, ConfigMixin):
         y=None,
         t_idx=None,
         block_profiler=None,
+        context_emb=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -566,7 +567,13 @@ class WanModel(ModelMixin, ConfigMixin):
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        # In fused CFG path, cond/uncond share the same latent input.
+        # Avoid duplicated patch embedding when two entries alias the same tensor.
+        if len(x) == 2 and x[0] is x[1]:
+            x0 = self.patch_embedding(x[0].unsqueeze(0))
+            x = [x0, x0]
+        else:
+            x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
@@ -586,12 +593,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # context
         context_lens = None
-        context = self.text_embedding(
-            torch.stack([
-                torch.cat(
-                    [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
-                for u in context
-            ]))
+        if context_emb is None:
+            context = self.encode_text_context(context)
+        else:
+            context = context_emb
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
@@ -644,6 +649,14 @@ class WanModel(ModelMixin, ConfigMixin):
         # unpatchify
         x = self.unpatchify(x, grid_sizes)
         return [u.float() for u in x]
+
+    def encode_text_context(self, context):
+        return self.text_embedding(
+            torch.stack([
+                torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                for u in context
+            ])
+        )
 
     def unpatchify(self, x, grid_sizes):
         r"""

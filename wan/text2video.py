@@ -351,18 +351,34 @@ class WanT2V:
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len, 'block_profiler': block_profiler}
-            arg_null = {'context': context_null, 'seq_len': seq_len, 'block_profiler': block_profiler}
+            arg_c = {'context': context, 'seq_len': seq_len, 'block_profiler': block_profiler, 'context_emb': None}
+            arg_null = {'context': context_null, 'seq_len': seq_len, 'block_profiler': block_profiler, 'context_emb': None}
             arg_all = {
-                'context': context if get_classifier_free_guidance_rank()==0 else context_null,
+                'context': context if get_classifier_free_guidance_rank() == 0 else context_null,
                 'seq_len': seq_len,
                 'block_profiler': block_profiler,
+                'context_emb': None,
             }
 
             if not legacy_model_to_each_step:
                 t0 = profiler.start()
                 self.model.to(self.device)
                 profiler.stop("dit_to_device", t0)
+
+                # Context tensors are static through denoising steps.
+                # Precompute text embedding once and reuse in each step.
+                t0 = profiler.start()
+                if get_classifier_free_guidance_world_size() == 2:
+                    arg_all['context_emb'] = self.model.encode_text_context(arg_all['context'])
+                elif cfg_fused_forward:
+                    fused_context = [context[0], context_null[0]]
+                    fused_context_emb = self.model.encode_text_context(fused_context)
+                    arg_c['context_emb'] = fused_context_emb[:1]
+                    arg_null['context_emb'] = fused_context_emb[1:]
+                else:
+                    arg_c['context_emb'] = self.model.encode_text_context(context)
+                    arg_null['context_emb'] = self.model.encode_text_context(context_null)
+                profiler.stop("text_embed_prepare", t0)
 
             denoise_loop_start = profiler.start()
             for t_idx, t in enumerate(tqdm(timesteps, disable=self.rank != 0)):
@@ -389,6 +405,9 @@ class WanT2V:
                 else:
                     if cfg_fused_forward:
                         t0 = profiler.start()
+                        fused_context_emb = None
+                        if arg_c['context_emb'] is not None and arg_null['context_emb'] is not None:
+                            fused_context_emb = torch.cat([arg_c['context_emb'], arg_null['context_emb']], dim=0)
                         noise_pred_pair = self.model(
                             [latent_model_input[0], latent_model_input[0]],
                             t=timestep.repeat(2),
@@ -396,6 +415,7 @@ class WanT2V:
                             seq_len=seq_len,
                             t_idx=t_idx,
                             block_profiler=block_profiler,
+                            context_emb=fused_context_emb,
                         )
                         noise_pred_cond, noise_pred_uncond = noise_pred_pair
                         profiler.stop("dit_forward_cfg_fused", t0, per_step=True)
