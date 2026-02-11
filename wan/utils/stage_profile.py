@@ -17,6 +17,7 @@ class StageProfiler:
         name="Inference",
         top_k=5,
         output_file=None,
+        run_info=None,
     ):
         self.enabled = enabled
         self.device = device
@@ -24,6 +25,7 @@ class StageProfiler:
         self.name = name
         self.top_k = top_k
         self.output_file = output_file
+        self.run_info = dict(run_info or {})
         self.stage_totals_ms = defaultdict(float)
         self.step_metrics_ms = defaultdict(list)
         self.stage_peak_alloc_bytes = defaultdict(float)
@@ -299,6 +301,23 @@ class StageProfiler:
     def _bytes_to_mb(value):
         return value / (1024.0 * 1024.0)
 
+    @staticmethod
+    def _to_float(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def update_run_info(self, **kwargs):
+        for key, value in kwargs.items():
+            if value is not None:
+                self.run_info[key] = value
+
+    @staticmethod
+    def _safe_kv_value(value):
+        text = str(value)
+        return text.replace(",", "_")
+
     def report(self):
         if not self.enabled:
             return
@@ -307,6 +326,8 @@ class StageProfiler:
         step_summaries = []
         memory_summaries = []
         request_memory_summary = None
+        perf_summaries = []
+        hotspot_summaries = []
 
         if self.stage_totals_ms:
             if self.rank == 0:
@@ -375,9 +396,63 @@ class StageProfiler:
                 f"reserved={req_peak_reserved_max:.1f}/{req_peak_reserved_avg:.1f} MB"
             )
 
+        stage_max_map = {stage_name: max_ms for stage_name, max_ms, _ in stage_summaries}
+        request_total_ms = stage_max_map.get("request_total", 0.0)
+        denoise_loop_ms = stage_max_map.get("denoise_loop_total", 0.0)
+        if request_total_ms > 0.0 and denoise_loop_ms > 0.0:
+            perf_summaries.append(("denoise_share_pct", denoise_loop_ms / request_total_ms * 100.0, "pct"))
+
+        if "denoise_step_total" in self.step_metrics_ms:
+            max_series, _ = self._reduce_series(self.step_metrics_ms["denoise_step_total"])
+            if len(max_series) > 0:
+                denoise_step_avg_ms = sum(max_series) / len(max_series)
+                perf_summaries.append(("denoise_step_avg_ms", denoise_step_avg_ms, "ms"))
+                if denoise_step_avg_ms > 0.0:
+                    perf_summaries.append(("denoise_steps_per_s", 1000.0 / denoise_step_avg_ms, "step/s"))
+
+        frame_num = self._to_float(self.run_info.get("frame_num"), default=0.0)
+        width = self._to_float(self.run_info.get("width"), default=0.0)
+        height = self._to_float(self.run_info.get("height"), default=0.0)
+        if request_total_ms > 0.0 and frame_num > 0.0:
+            request_total_s = request_total_ms / 1000.0
+            perf_summaries.append(("frames_per_s", frame_num / request_total_s, "frame/s"))
+            if width > 0.0 and height > 0.0:
+                megapixel_total = frame_num * width * height / 1_000_000.0
+                perf_summaries.append(("megapixel_per_s", megapixel_total / request_total_s, "MP/s"))
+
+        if request_total_ms > 0.0:
+            hot_candidates = [
+                (stage_name, max_ms)
+                for stage_name, max_ms, _ in stage_summaries
+                if stage_name != "request_total"
+            ]
+            hot_candidates.sort(key=lambda item: item[1], reverse=True)
+            for idx, (stage_name, max_ms) in enumerate(hot_candidates[: self.top_k], start=1):
+                hotspot_summaries.append((idx, stage_name, max_ms, max_ms / request_total_ms * 100.0))
+
+        if self.rank == 0 and perf_summaries:
+            logging.info(f"[{self.name} StageProfile] ==== Derived Perf Metrics (max_rank) ====")
+            for metric_name, metric_value, metric_unit in perf_summaries:
+                logging.info(
+                    f"[{self.name} StageProfile] {metric_name}: {metric_value:.3f} {metric_unit}"
+                )
+
+        if self.rank == 0 and hotspot_summaries:
+            logging.info(f"[{self.name} StageProfile] ==== Stage Hotspots (max_rank) ====")
+            for rank_idx, stage_name, stage_ms, share_pct in hotspot_summaries:
+                logging.info(
+                    f"[{self.name} StageProfile] top{rank_idx}: "
+                    f"{stage_name} {stage_ms:.3f} ms ({share_pct:.2f}%)"
+                )
+
         if not self.step_metrics_ms:
             self._append_report_file(
-                stage_summaries, step_summaries, memory_summaries, request_memory_summary
+                stage_summaries,
+                step_summaries,
+                memory_summaries,
+                request_memory_summary,
+                perf_summaries,
+                hotspot_summaries,
             )
             return
 
@@ -424,7 +499,12 @@ class StageProfiler:
                 )
 
         self._append_report_file(
-            stage_summaries, step_summaries, memory_summaries, request_memory_summary
+            stage_summaries,
+            step_summaries,
+            memory_summaries,
+            request_memory_summary,
+            perf_summaries,
+            hotspot_summaries,
         )
 
     def _append_report_file(
@@ -433,6 +513,8 @@ class StageProfiler:
         step_summaries,
         memory_summaries,
         request_memory_summary,
+        perf_summaries,
+        hotspot_summaries,
     ):
         if self.rank != 0 or not self.output_file:
             return
@@ -443,8 +525,12 @@ class StageProfiler:
 
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            run_info_fields = []
+            for key in sorted(self.run_info.keys()):
+                run_info_fields.append(f"{key}={self._safe_kv_value(self.run_info[key])}")
+            run_info_suffix = "," + ",".join(run_info_fields) if run_info_fields else ""
             with open(self.output_file, "a", encoding="utf-8") as f:
-                f.write(f"RUN,{ts},{self.name},world_size={world_size}\n")
+                f.write(f"RUN,{ts},{self.name},world_size={world_size}{run_info_suffix}\n")
                 for stage_name, max_ms, avg_ms in stage_summaries:
                     f.write(f"TOTAL,{stage_name},{max_ms:.3f},{avg_ms:.3f}\n")
                 for (
@@ -474,6 +560,13 @@ class StageProfiler:
                         "MEM_REQUEST,"
                         f"{req_peak_alloc_max:.3f},{req_peak_alloc_avg:.3f},"
                         f"{req_peak_reserved_max:.3f},{req_peak_reserved_avg:.3f}\n"
+                    )
+                for metric_name, metric_value, metric_unit in perf_summaries:
+                    f.write(f"PERF,{metric_name},{metric_value:.6f},{metric_unit}\n")
+                for hot_rank, stage_name, stage_ms, stage_share_pct in hotspot_summaries:
+                    f.write(
+                        "HOT,"
+                        f"{hot_rank},{stage_name},{stage_ms:.3f},{stage_share_pct:.3f}\n"
                     )
                 for (
                     metric_name,

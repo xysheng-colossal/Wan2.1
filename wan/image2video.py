@@ -235,6 +235,13 @@ class WanI2V:
             rank=self.rank,
             name="I2V",
             output_file=profile_stage_file,
+            run_info={
+                "frame_num": frame_num,
+                "sampling_steps": sampling_steps,
+                "max_area": max_area,
+                "offload_model": int(bool(offload_model)),
+                "sample_solver": sample_solver,
+            },
         )
         configure_attention_profiler(
             enabled=profile_attn,
@@ -260,6 +267,7 @@ class WanI2V:
             self.patch_size[2] * self.patch_size[2])
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
+        profiler.update_run_info(width=w, height=h, latent_h=lat_h, latent_w=lat_w)
 
         max_seq_len = ((F - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
             self.patch_size[1] * self.patch_size[2])
@@ -429,18 +437,17 @@ class WanI2V:
             profiler.stop("dit_to_device", t0)
 
             denoise_loop_start = profiler.start()
-            for t_idx, t in enumerate(tqdm(timesteps)):
+            for t_idx, t in enumerate(tqdm(timesteps, disable=self.rank != 0)):
                 step_start = profiler.start()
-                latent_model_input = [latent.to(self.device)]
-                timestep = [t]
-
-                timestep = torch.stack(timestep).to(self.device)
+                latent_model_input = [latent.to(self.device)] if offload_model else [latent]
+                timestep = t.unsqueeze(0)
 
                 if get_classifier_free_guidance_world_size() == 2:
                     t0 = profiler.start()
                     noise_pred = self.model(
-                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0].to(
-                            torch.device('cpu') if offload_model else self.device)
+                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0]
+                    if offload_model:
+                        noise_pred = noise_pred.to(torch.device('cpu'))
                     profiler.stop("dit_forward", t0, per_step=True)
 
                     t0 = profiler.start()
@@ -455,8 +462,9 @@ class WanI2V:
                 else:
                     t0 = profiler.start()
                     noise_pred_cond = self.model(
-                        latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0].to(
-                            torch.device('cpu') if offload_model else self.device)
+                        latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0]
+                    if offload_model:
+                        noise_pred_cond = noise_pred_cond.to(torch.device('cpu'))
                     profiler.stop("dit_forward_cond", t0, per_step=True)
                     if offload_model:
                         t0 = profiler.start()
@@ -465,8 +473,9 @@ class WanI2V:
 
                     t0 = profiler.start()
                     noise_pred_uncond = self.model(
-                        latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0].to(
-                            torch.device('cpu') if offload_model else self.device)
+                        latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0]
+                    if offload_model:
+                        noise_pred_uncond = noise_pred_uncond.to(torch.device('cpu'))
                     profiler.stop("dit_forward_uncond", t0, per_step=True)
                     if offload_model:
                         t0 = profiler.start()
@@ -479,8 +488,8 @@ class WanI2V:
                 profiler.stop("cfg_combine", t0, per_step=True)
 
                 t0 = profiler.start()
-                latent = latent.to(
-                    torch.device('cpu') if offload_model else self.device)
+                if offload_model:
+                    latent = latent.to(torch.device('cpu'))
                 profiler.stop("latent_to_target_device", t0, per_step=True)
 
                 t0 = profiler.start()
@@ -494,7 +503,7 @@ class WanI2V:
                 latent = temp_x0.squeeze(0)
 
                 t0 = profiler.start()
-                x0 = [latent.to(self.device)]
+                x0 = [latent.to(self.device)] if offload_model else [latent]
                 profiler.stop("x0_to_device", t0, per_step=True)
                 del latent_model_input, timestep
                 profiler.stop("denoise_step_total", step_start, per_step=True)

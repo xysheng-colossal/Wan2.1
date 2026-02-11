@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 import os
 import sys
+import subprocess
 import warnings
 import random
 import time
@@ -150,6 +151,12 @@ def _parse_args():
         type=str,
         default=None,
         help="Append concise attention profile report to this file (ATTN_RUN/ATTN format).",
+    )
+    parser.add_argument(
+        "--analyze_profile",
+        action="store_true",
+        default=False,
+        help="After generation, analyze profile_stage_file and print bottlenecks/suggestions.",
     )
     parser.add_argument(
         "--perf_logic",
@@ -332,6 +339,38 @@ def _attach_cache_to_transformer(transformer, dit_fsdp, cache, args):
 
 def _get_cache_blocks_count(args, transformer):
     return len(transformer.blocks) * 2 // args.cfg_size
+
+
+def _run_profile_analysis(profile_file):
+    if not profile_file:
+        logging.warning("Skip profile analysis because profile_stage_file is empty.")
+        return
+
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "analyze_perf.py")
+    if not os.path.exists(script_path):
+        logging.warning(f"Skip profile analysis because script not found: {script_path}")
+        return
+
+    if not os.path.exists(profile_file):
+        logging.warning(f"Skip profile analysis because profile file not found: {profile_file}")
+        return
+
+    cmd = [sys.executable, script_path, profile_file]
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except Exception as exc:
+        logging.warning(f"Profile analysis failed: {exc}")
+        return
+
+    if result.returncode != 0:
+        logging.warning(
+            f"Profile analysis exited with code {result.returncode}: {result.stderr.strip()}"
+        )
+        return
+
+    output = result.stdout.strip()
+    if output:
+        logging.info("Profile analysis report:\n" + output)
 
 
 def generate(args):
@@ -681,6 +720,9 @@ def generate(args):
 
 
     if rank == 0:
+        if args.analyze_profile and args.profile_stage:
+            _run_profile_analysis(args.profile_stage_file)
+
         if args.save_file is None:
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
             formatted_prompt = args.prompt.replace(" ", "_").replace("/",

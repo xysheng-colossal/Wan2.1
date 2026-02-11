@@ -215,6 +215,15 @@ class WanT2V:
             rank=self.rank,
             name="T2V",
             output_file=profile_stage_file,
+            run_info={
+                "frame_num": frame_num,
+                "sampling_steps": sampling_steps,
+                "width": size[0],
+                "height": size[1],
+                "offload_model": int(bool(offload_model)),
+                "sample_solver": sample_solver,
+                "legacy_model_to_each_step": int(bool(legacy_model_to_each_step)),
+            },
         )
         configure_attention_profiler(
             enabled=profile_attn,
@@ -332,12 +341,10 @@ class WanT2V:
                 profiler.stop("dit_to_device", t0)
 
             denoise_loop_start = profiler.start()
-            for t_idx, t in enumerate(tqdm(timesteps)):
+            for t_idx, t in enumerate(tqdm(timesteps, disable=self.rank != 0)):
                 step_start = profiler.start()
                 latent_model_input = latents
-                timestep = [t]
-
-                timestep = torch.stack(timestep)
+                timestep = t.unsqueeze(0)
 
                 if legacy_model_to_each_step:
                     t0 = profiler.start()
