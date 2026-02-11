@@ -10,6 +10,7 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention, attention
 from wan.utils.rainfusion import Rainfusion
+from wan.utils.block_profile import get_block_profiler
 from mindiesd import rotary_position_embedding
 
 __all__ = ['WanModel']
@@ -631,8 +632,12 @@ class WanModel(ModelMixin, ConfigMixin):
             t_idx=t_idx,
         )
 
-        for block in self.blocks:
+        block_profiler = get_block_profiler()
+        for block_idx, block in enumerate(self.blocks):
+            t0 = block_profiler.start() if block_profiler is not None else None
             x = block(x, **kwargs)
+            if block_profiler is not None:
+                block_profiler.stop(block_idx, t0)
 
         # head
         x = self.head(x, e)

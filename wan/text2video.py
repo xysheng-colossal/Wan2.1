@@ -26,6 +26,10 @@ from .utils.attention_profile import (
     configure_attention_profiler,
     report_attention_profiler,
 )
+from .utils.block_profile import (
+    configure_block_profiler,
+    report_block_profiler,
+)
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 
 from wan.distributed.parallel_mgr import (
@@ -165,6 +169,8 @@ class WanT2V:
                  profile_stage_file=None,
                  profile_attn=False,
                  profile_attn_file=None,
+                 profile_block=False,
+                 profile_block_file=None,
                  legacy_model_to_each_step=False,
                  cfg_fused_forward=False):
         r"""
@@ -199,6 +205,10 @@ class WanT2V:
                 If True, enable internal attention stage profiling
             profile_attn_file (`str`, *optional*, defaults to None):
                 If set, append concise attention profiling lines into this file
+            profile_block (`bool`, *optional*, defaults to False):
+                If True, enable DiT block-level profiling
+            profile_block_file (`str`, *optional*, defaults to None):
+                If set, append concise block profiling lines into this file
             legacy_model_to_each_step (`bool`, *optional*, defaults to False):
                 If True, keeps legacy behavior of calling `model.to(device)` at each denoise step
             cfg_fused_forward (`bool`, *optional*, defaults to False):
@@ -235,6 +245,13 @@ class WanT2V:
             rank=self.rank,
             name="T2V",
             output_file=profile_attn_file,
+        )
+        configure_block_profiler(
+            enabled=profile_block,
+            device=self.device,
+            rank=self.rank,
+            name="T2V",
+            output_file=profile_block_file,
         )
         total_start = profiler.start()
 
@@ -443,5 +460,6 @@ class WanT2V:
         profiler.stop("request_total", total_start)
         profiler.report()
         report_attention_profiler()
+        report_block_profiler()
 
         return videos[0] if self.rank == 0 else None

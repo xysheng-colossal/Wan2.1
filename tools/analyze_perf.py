@@ -113,6 +113,55 @@ def parse_attn_runs(lines):
     return runs
 
 
+def parse_block_runs(lines):
+    runs = []
+    current = None
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        record = parts[0]
+        if record == "BLOCK_RUN":
+            if current is not None:
+                runs.append(current)
+            current = {
+                "ts": parts[1] if len(parts) > 1 else "",
+                "name": parts[2] if len(parts) > 2 else "",
+                "blocks": [],
+                "top": [],
+            }
+            continue
+        if current is None:
+            continue
+        if record == "BLOCK" and len(parts) >= 7:
+            current["blocks"].append(
+                {
+                    "name": parts[1],
+                    "total_max_ms": _to_float(parts[2]),
+                    "total_avg_ms": _to_float(parts[3]),
+                    "call_avg_ms": _to_float(parts[4]),
+                    "call_max_ms": _to_float(parts[5]),
+                    "calls": int(_to_float(parts[6], 0)),
+                }
+            )
+        elif record == "BLOCK_TOP" and len(parts) >= 5:
+            current["top"].append(
+                {
+                    "rank": int(_to_float(parts[1], 0)),
+                    "name": parts[2],
+                    "total_max_ms": _to_float(parts[3]),
+                    "share": _to_float(parts[4]),
+                }
+            )
+        elif record == "BLOCK_END":
+            runs.append(current)
+            current = None
+    if current is not None:
+        runs.append(current)
+    return runs
+
+
 def fmt_delta(new_v, old_v):
     if old_v == 0:
         return "n/a"
@@ -121,7 +170,7 @@ def fmt_delta(new_v, old_v):
     return f"{sign}{delta_pct:.2f}%"
 
 
-def summarize_run(run):
+def summarize_run(run, block_run=None):
     print(f"Run: {run['ts']}  name={run['name']}")
     if run["meta"]:
         meta_text = ", ".join(f"{k}={v}" for k, v in sorted(run["meta"].items()))
@@ -155,6 +204,28 @@ def summarize_run(run):
             metric = run["perf"][key]
             print(f"  {key}: {metric['value']:.6f} {metric['unit']}")
 
+    if block_run and (block_run.get("top") or block_run.get("blocks")):
+        print("Top DiT blocks:")
+        block_top = sorted(block_run.get("top", []), key=lambda x: x["rank"])
+        if not block_top:
+            fallback = sorted(
+                block_run.get("blocks", []),
+                key=lambda x: x["total_max_ms"],
+                reverse=True,
+            )[:5]
+            block_top = [
+                {
+                    "rank": idx + 1,
+                    "name": item["name"],
+                    "total_max_ms": item["total_max_ms"],
+                    "share": 0.0,
+                }
+                for idx, item in enumerate(fallback)
+            ]
+        for item in block_top[:5]:
+            suffix = f", share={item['share']:.2%}" if item["share"] > 0 else ""
+            print(f"  {item['rank']}. {item['name']}: {item['total_max_ms']:.3f} ms{suffix}")
+
 
 def get_metric_value(run, key):
     if key in run["perf"]:
@@ -173,7 +244,7 @@ def print_comparison(current, prev):
         print(f"  {key}: {cur_v:.6f}{unit} ({fmt_delta(cur_v, prev_v)})")
 
 
-def build_suggestions(stage_run, attn_run):
+def build_suggestions(stage_run, attn_run, block_run):
     suggestions = []
     total = stage_run["total"]
     perf = stage_run["perf"]
@@ -224,6 +295,16 @@ def build_suggestions(stage_run, attn_run):
         if kernel_share < 0.45:
             suggestions.append("Attention kernel占比偏低，可能受pack/通信或其他开销限制，建议检查qkv打包与数据布局。")
 
+    if block_run and block_run.get("top"):
+        top_list = sorted(block_run["top"], key=lambda x: x["rank"])
+        if len(top_list) >= 2:
+            top1_share = top_list[0]["share"]
+            top2_share = top_list[1]["share"]
+            if top1_share > 0.035 and top1_share > top2_share * 1.20:
+                suggestions.append(
+                    "少数DiT block占比偏高，建议对top block做细粒度算子分析（LayerNorm/attention/FFN）并尝试算子融合。"
+                )
+
     return suggestions
 
 
@@ -238,6 +319,7 @@ def main():
     lines = args.profile_file.read_text(encoding="utf-8").splitlines()
     stage_runs = parse_stage_runs(lines)
     attn_runs = parse_attn_runs(lines)
+    block_runs = parse_block_runs(lines)
 
     if not stage_runs:
         raise SystemExit("No stage profiling runs found.")
@@ -245,12 +327,13 @@ def main():
     current = stage_runs[-1]
     previous = stage_runs[-2] if len(stage_runs) > 1 else None
     attn_current = attn_runs[-1] if attn_runs else None
+    block_current = block_runs[-1] if block_runs else None
 
-    summarize_run(current)
+    summarize_run(current, block_current)
     if previous:
         print_comparison(current, previous)
 
-    suggestions = build_suggestions(current, attn_current)
+    suggestions = build_suggestions(current, attn_current, block_current)
     if suggestions:
         print("\nOptimization suggestions:")
         for idx, text in enumerate(suggestions, start=1):

@@ -153,6 +153,18 @@ def _parse_args():
         help="Append concise attention profile report to this file (ATTN_RUN/ATTN format).",
     )
     parser.add_argument(
+        "--profile_block",
+        action="store_true",
+        default=False,
+        help="Enable DiT block-level breakdown profiling.",
+    )
+    parser.add_argument(
+        "--profile_block_file",
+        type=str,
+        default=None,
+        help="Append concise block profile report to this file (BLOCK_RUN/BLOCK format).",
+    )
+    parser.add_argument(
         "--analyze_profile",
         action="store_true",
         default=False,
@@ -535,6 +547,7 @@ def generate(args):
             cfg_fused_forward=args.cfg_fused_forward,
         )
         attn_profile_file = args.profile_attn_file or args.profile_stage_file
+        block_profile_file = args.profile_block_file or args.profile_stage_file
 
         logging.info(f"Warm up 2 steps...")
         video = wan_t2v.generate(
@@ -551,6 +564,8 @@ def generate(args):
             profile_stage_file=None,
             profile_attn=False,
             profile_attn_file=None,
+            profile_block=False,
+            profile_block_file=None,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
             cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
         )
@@ -584,6 +599,8 @@ def generate(args):
             profile_stage_file=args.profile_stage_file,
             profile_attn=args.profile_attn,
             profile_attn_file=attn_profile_file,
+            profile_block=args.profile_block,
+            profile_block_file=block_profile_file,
             legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
             cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
         )
@@ -672,6 +689,7 @@ def generate(args):
             offload_model=args.offload_model,
         )
         attn_profile_file = args.profile_attn_file or args.profile_stage_file
+        block_profile_file = args.profile_block_file or args.profile_stage_file
 
         logging.info(f"Warm up 2 steps...")
         video = wan_i2v.generate(
@@ -689,6 +707,8 @@ def generate(args):
             profile_stage_file=None,
             profile_attn=False,
             profile_attn_file=None,
+            profile_block=False,
+            profile_block_file=None,
         )
 
         if args.use_attentioncache:
@@ -721,6 +741,8 @@ def generate(args):
             profile_stage_file=args.profile_stage_file,
             profile_attn=args.profile_attn,
             profile_attn_file=attn_profile_file,
+            profile_block=args.profile_block,
+            profile_block_file=block_profile_file,
         )
 
         stream.synchronize()

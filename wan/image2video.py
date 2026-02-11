@@ -29,6 +29,10 @@ from .utils.attention_profile import (
     configure_attention_profiler,
     report_attention_profiler,
 )
+from .utils.block_profile import (
+    configure_block_profiler,
+    report_block_profiler,
+)
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 from wan.distributed.parallel_mgr import (
     get_sequence_parallel_world_size,
@@ -184,7 +188,9 @@ class WanI2V:
                  profile_stage=False,
                  profile_stage_file=None,
                  profile_attn=False,
-                 profile_attn_file=None):
+                 profile_attn_file=None,
+                 profile_block=False,
+                 profile_block_file=None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -220,6 +226,10 @@ class WanI2V:
                 If True, enable internal attention stage profiling
             profile_attn_file (`str`, *optional*, defaults to None):
                 If set, append concise attention profiling lines into this file
+            profile_block (`bool`, *optional*, defaults to False):
+                If True, enable DiT block-level profiling
+            profile_block_file (`str`, *optional*, defaults to None):
+                If set, append concise block profiling lines into this file
 
         Returns:
             torch.Tensor:
@@ -249,6 +259,13 @@ class WanI2V:
             rank=self.rank,
             name="I2V",
             output_file=profile_attn_file,
+        )
+        configure_block_profiler(
+            enabled=profile_block,
+            device=self.device,
+            rank=self.rank,
+            name="I2V",
+            output_file=profile_block_file,
         )
         total_start = profiler.start()
 
@@ -540,5 +557,6 @@ class WanI2V:
         profiler.stop("request_total", total_start)
         profiler.report()
         report_attention_profiler()
+        report_block_profiler()
 
         return videos[0] if self.rank == 0 else None
