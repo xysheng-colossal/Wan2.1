@@ -351,18 +351,34 @@ def _set_transformer_rainfusion_config(transformer, dit_fsdp, rainfusion_config)
 
 
 def _attach_cache_to_transformer(transformer, dit_fsdp, cache, args):
-    if dit_fsdp:
-        for block in transformer._fsdp_wrapped_module.blocks:
-            block._fsdp_wrapped_module.cache = cache
-            block._fsdp_wrapped_module.args = args
-    else:
-        for block in transformer.blocks:
-            block.cache = cache
-            block.args = args
+    for block in _iter_transformer_cache_blocks(transformer, dit_fsdp):
+        block.cache = cache
+        block.args = args
 
 
 def _get_cache_blocks_count(args, transformer):
-    return len(transformer.blocks) * 2 // args.cfg_size
+    return len(_iter_transformer_cache_blocks(transformer, args.dit_fsdp)) * 2 // args.cfg_size
+
+
+def _iter_transformer_cache_blocks(transformer, dit_fsdp):
+    def _unwrap_fsdp(module):
+        return getattr(module, "_fsdp_wrapped_module", module)
+
+    root = _unwrap_fsdp(transformer) if dit_fsdp else transformer
+    if not hasattr(root, "blocks"):
+        return []
+
+    targets = []
+    for block in root.blocks:
+        stack = [_unwrap_fsdp(block)]
+        while stack:
+            module = stack.pop()
+            if hasattr(module, "cache") and hasattr(module, "args"):
+                targets.append(module)
+            if hasattr(module, "blocks"):
+                for child in reversed(list(module.blocks)):
+                    stack.append(_unwrap_fsdp(child))
+    return targets
 
 
 def _run_profile_analysis(profile_file):
