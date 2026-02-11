@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 MAX_TOKEN = 2147483647
 _QKV_A2A_MODE_LOGGED = False
 _A2A_FENCE_MODE_LOGGED = False
+_A2A_EVENT_GATE_LOGGED = False
+_A2A_COMM_STREAM = {}
 
 
 def _device_sync_if_needed(enabled):
@@ -43,6 +45,71 @@ def _resolve_a2a_fence_mode():
     if raw_mode in ("2", "full", "all"):
         return 2, "full"
     return 0, f"invalid({raw_mode})->disabled"
+
+
+def _resolve_a2a_event_gate():
+    raw = os.getenv("WAN_A2A_EVENT_GATE", "0").strip().lower()
+    if raw in ("0", "off", "false", ""):
+        return False, "disabled"
+    if raw in ("1", "on", "true", "gate"):
+        return True, "enabled"
+    return False, f"invalid({raw})->disabled"
+
+
+def _get_device_api():
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.npu
+    if torch.cuda.is_available():
+        return torch.cuda
+    return None
+
+
+def _get_a2a_comm_stream():
+    device_api = _get_device_api()
+    if device_api is None:
+        return None
+    device_idx = device_api.current_device()
+    stream = _A2A_COMM_STREAM.get(device_idx)
+    if stream is None:
+        stream = device_api.Stream()
+        _A2A_COMM_STREAM[device_idx] = stream
+    return stream
+
+
+def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_event_gate):
+    if not enable_event_gate:
+        return all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+
+    device_api = _get_device_api()
+    comm_stream = _get_a2a_comm_stream()
+    if device_api is None or comm_stream is None:
+        return all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+
+    current_stream = device_api.current_stream()
+    ready_event = device_api.Event()
+    done_event = device_api.Event()
+    ready_event.record(current_stream)
+    comm_stream.wait_event(ready_event)
+    with device_api.stream(comm_stream):
+        output = all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+        done_event.record(comm_stream)
+    current_stream.wait_event(done_event)
+    return output
 
 class xFuserLongContextAttention(LongContextAttention):
     ring_impl_type_supported_kv_cache = ["basic"]
@@ -156,10 +223,12 @@ class xFuserLongContextAttention(LongContextAttention):
 
         use_packed_qkv_a2a = os.getenv("WAN_PACKED_QKV_A2A", "1") != "0"
         a2a_fence_mode, a2a_fence_mode_name = _resolve_a2a_fence_mode()
+        a2a_event_gate_enabled, a2a_event_gate_name = _resolve_a2a_event_gate()
         fence_before_qkv = a2a_fence_mode >= 1
         fence_full = a2a_fence_mode >= 2
         global _QKV_A2A_MODE_LOGGED
         global _A2A_FENCE_MODE_LOGGED
+        global _A2A_EVENT_GATE_LOGGED
         if not _QKV_A2A_MODE_LOGGED:
             if not dist.is_initialized() or dist.get_rank() == 0:
                 mode = "packed_qkv_single_all_to_all" if use_packed_qkv_a2a else "legacy_qkv_three_all_to_all"
@@ -172,6 +241,13 @@ class xFuserLongContextAttention(LongContextAttention):
                     f"(WAN_A2A_FENCE={os.getenv('WAN_A2A_FENCE', '0')})"
                 )
             _A2A_FENCE_MODE_LOGGED = True
+        if not _A2A_EVENT_GATE_LOGGED:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                logger.info(
+                    f"Attention all_to_all event gate: {a2a_event_gate_name} "
+                    f"(WAN_A2A_EVENT_GATE={os.getenv('WAN_A2A_EVENT_GATE', '0')})"
+                )
+            _A2A_EVENT_GATE_LOGGED = True
         if use_packed_qkv_a2a:
             _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
@@ -179,11 +255,12 @@ class xFuserLongContextAttention(LongContextAttention):
             profile_stop("qkv_concat", t0)
 
             t0 = profile_start()
-            qkv_layer = all_to_all_4D(
+            qkv_layer = _all_to_all_with_event_gate(
                 input_=qkv,
                 scatter_idx=2,
                 gather_idx=1,
                 group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
             )
             profile_stop("qkv_all_to_all", t0)
 
@@ -198,31 +275,34 @@ class xFuserLongContextAttention(LongContextAttention):
         else:
             _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
-            query_layer = all_to_all_4D(
+            query_layer = _all_to_all_with_event_gate(
                 input_=query,
                 scatter_idx=2,
                 gather_idx=1,
                 group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
             )
             profile_stop("q_all_to_all", t0)
 
             _device_sync_if_needed(fence_full)
             t0 = profile_start()
-            key_layer = all_to_all_4D(
+            key_layer = _all_to_all_with_event_gate(
                 input_=key,
                 scatter_idx=2,
                 gather_idx=1,
                 group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
             )
             profile_stop("k_all_to_all", t0)
 
             _device_sync_if_needed(fence_full)
             t0 = profile_start()
-            value_layer = all_to_all_4D(
+            value_layer = _all_to_all_with_event_gate(
                 input_=value,
                 scatter_idx=2,
                 gather_idx=1,
                 group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
             )
             profile_stop("v_all_to_all", t0)
 
@@ -289,11 +369,12 @@ class xFuserLongContextAttention(LongContextAttention):
         # scatter 1, gather 2
         _device_sync_if_needed(fence_full)
         t0 = profile_start()
-        output = all_to_all_4D(
+        output = _all_to_all_with_event_gate(
             input_=context_layer,
             scatter_idx=1,
             gather_idx=2,
             group=self.ulysses_pg,
+            enable_event_gate=a2a_event_gate_enabled,
         )
         profile_stop("out_all_to_all", t0)
         profile_stop("attn_forward_total", total_start)
