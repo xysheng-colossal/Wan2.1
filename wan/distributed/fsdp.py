@@ -4,6 +4,7 @@ from functools import partial
 import os
 
 import torch
+import torch.nn as nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
@@ -23,6 +24,53 @@ def _resolve_sharding_strategy(default_strategy):
             f"but got {strategy_name}"
         )
     return strategy_map[strategy_name]
+
+
+class _FSDPBlockGroup(nn.Module):
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, x, **kwargs):
+        for block in self.blocks:
+            x = block(x, **kwargs)
+        return x
+
+    def clear_runtime_cache(self):
+        for block in self.blocks:
+            if hasattr(block, "clear_runtime_cache"):
+                block.clear_runtime_cache()
+
+
+def _resolve_block_group_size():
+    raw = os.getenv("WAN_FSDP_BLOCK_GROUP_SIZE", "").strip()
+    if raw == "":
+        return 1
+    try:
+        value = int(raw)
+    except Exception as exc:
+        raise ValueError("WAN_FSDP_BLOCK_GROUP_SIZE must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("WAN_FSDP_BLOCK_GROUP_SIZE must be a positive integer")
+    return value
+
+
+def _maybe_group_blocks_for_fsdp(model):
+    group_size = _resolve_block_group_size()
+    if group_size <= 1:
+        return
+    if not hasattr(model, "blocks"):
+        return
+    blocks = list(model.blocks)
+    if len(blocks) == 0:
+        return
+    if isinstance(blocks[0], _FSDPBlockGroup):
+        return
+
+    grouped_blocks = []
+    for idx in range(0, len(blocks), group_size):
+        grouped_blocks.append(_FSDPBlockGroup(blocks[idx:idx + group_size]))
+    model.blocks = nn.ModuleList(grouped_blocks)
 
 
 def shard_model(
@@ -46,6 +94,7 @@ def shard_model(
         sync_module_states = True if use_legacy_behavior else False
 
     sharding_strategy = _resolve_sharding_strategy(sharding_strategy)
+    _maybe_group_blocks_for_fsdp(model)
     fsdp_kwargs = dict(
         module=model,
         process_group=process_group,
