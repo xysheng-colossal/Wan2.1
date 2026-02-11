@@ -55,6 +55,7 @@ def usp_dit_forward(
     y=None,
     t_idx=None,
     block_profiler=None,
+    context_emb=None,
 ):
     """
     x:              A list of videos each with shape [C, T, H, W].
@@ -79,7 +80,11 @@ def usp_dit_forward(
         x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
     # embeddings
-    x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+    if len(x) == 2 and x[0] is x[1]:
+        x0 = self.patch_embedding(x[0].unsqueeze(0))
+        x = [x0, x0]
+    else:
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
     grid_sizes = torch.stack(
         [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
     x = [u.flatten(2).transpose(1, 2) for u in x]
@@ -99,11 +104,17 @@ def usp_dit_forward(
 
     # context
     context_lens = None
-    context = self.text_embedding(
-        torch.stack([
-            torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
-            for u in context
-        ]))
+    if context_emb is None:
+        context_key = self.build_context_cache_key(context)
+        context_emb_cached = self._context_cache.get(context_key)
+        if context_emb_cached is None:
+            context_emb_cached = self.encode_text_context(context)
+            if len(self._context_cache) >= 4:
+                self._context_cache.clear()
+            self._context_cache[context_key] = context_emb_cached
+        context = context_emb_cached
+    else:
+        context = context_emb
 
     if clip_fea is not None:
         context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
