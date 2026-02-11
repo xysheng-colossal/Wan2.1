@@ -1,6 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import inspect
 from functools import partial
+import logging
 import os
 
 import torch
@@ -8,6 +9,14 @@ import torch.nn as nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+
+from .comm_order import (
+    is_fsdp_allgather_wait_a2a_enabled,
+    wait_current_stream_on_last_a2a_done,
+    wait_stream_on_last_a2a_done,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_sharding_strategy(default_strategy):
@@ -79,6 +88,38 @@ def _maybe_group_blocks_for_fsdp(model):
     model.blocks = nn.ModuleList(grouped_blocks)
 
 
+def _register_fsdp_allgather_wait_a2a_hooks(model):
+    if not is_fsdp_allgather_wait_a2a_enabled():
+        return
+
+    mode_logged = False
+
+    def _pre_forward_hook(fsdp_module, _inputs):
+        streams = getattr(fsdp_module, "_streams", None)
+        waited = False
+        if isinstance(streams, dict):
+            for stream_name, stream_obj in streams.items():
+                lower_name = str(stream_name).lower()
+                if "all_gather" in lower_name or "allgather" in lower_name or "unshard" in lower_name:
+                    waited = wait_stream_on_last_a2a_done(stream_obj) or waited
+        if not waited:
+            wait_current_stream_on_last_a2a_done()
+
+    for module in model.modules():
+        if isinstance(module, FSDP):
+            module.register_forward_pre_hook(_pre_forward_hook)
+            mode_logged = True
+
+    if mode_logged and (
+        not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+    ):
+        logger.info(
+            "FSDP all-gather wait-after-A2A enabled "
+            "(WAN_FSDP_ALLGATHER_WAIT_A2A=%s)",
+            os.getenv("WAN_FSDP_ALLGATHER_WAIT_A2A", "0"),
+        )
+
+
 def shard_model(
     model,
     device_id,
@@ -139,4 +180,5 @@ def shard_model(
             fsdp_kwargs["limit_all_gathers"] = True
 
     model = FSDP(**fsdp_kwargs)
+    _register_fsdp_allgather_wait_a2a_hooks(model)
     return model

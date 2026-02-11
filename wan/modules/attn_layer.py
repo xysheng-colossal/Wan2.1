@@ -14,6 +14,7 @@ from typing import Any
 
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
+from ..distributed.comm_order import record_last_a2a_done_event
 from wan.utils.rainfusion import Rainfusion
 from wan.utils.attention_profile import get_attention_profiler
 
@@ -78,22 +79,26 @@ def _get_a2a_comm_stream():
 
 def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_event_gate):
     if not enable_event_gate:
-        return all_to_all_4D(
+        output = all_to_all_4D(
             input_=input_,
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,
             group=group,
         )
+        record_last_a2a_done_event()
+        return output
 
     device_api = _get_device_api()
     comm_stream = _get_a2a_comm_stream()
     if device_api is None or comm_stream is None:
-        return all_to_all_4D(
+        output = all_to_all_4D(
             input_=input_,
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,
             group=group,
         )
+        record_last_a2a_done_event()
+        return output
 
     current_stream = device_api.current_stream()
     ready_event = device_api.Event()
@@ -109,6 +114,7 @@ def _all_to_all_with_event_gate(input_, scatter_idx, gather_idx, group, enable_e
         )
         done_event.record(comm_stream)
     current_stream.wait_event(done_event)
+    record_last_a2a_done_event()
     return output
 
 class xFuserLongContextAttention(LongContextAttention):
