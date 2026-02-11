@@ -31,9 +31,9 @@ class _FSDPBlockGroup(nn.Module):
         super().__init__()
         self.blocks = nn.ModuleList(blocks)
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, *args, **kwargs):
         for block in self.blocks:
-            x = block(x, **kwargs)
+            x = block(x, *args, **kwargs)
         return x
 
     def clear_runtime_cache(self):
@@ -55,11 +55,17 @@ def _resolve_block_group_size():
     return value
 
 
+def _is_wan_dit_model(model):
+    # Block grouping is intended for Wan DiT blocks only.
+    required_attrs = ("blocks", "patch_embedding", "time_projection")
+    return all(hasattr(model, attr) for attr in required_attrs)
+
+
 def _maybe_group_blocks_for_fsdp(model):
     group_size = _resolve_block_group_size()
     if group_size <= 1:
         return
-    if not hasattr(model, "blocks"):
+    if not _is_wan_dit_model(model):
         return
     blocks = list(model.blocks)
     if len(blocks) == 0:
