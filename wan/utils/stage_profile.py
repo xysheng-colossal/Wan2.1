@@ -26,6 +26,12 @@ class StageProfiler:
         self.output_file = output_file
         self.stage_totals_ms = defaultdict(float)
         self.step_metrics_ms = defaultdict(list)
+        self.stage_peak_alloc_bytes = defaultdict(float)
+        self.stage_peak_reserved_bytes = defaultdict(float)
+        self.stage_peak_delta_alloc_bytes = defaultdict(float)
+        self.request_peak_alloc_bytes = 0.0
+        self.request_peak_reserved_bytes = 0.0
+        self._reset_peak_memory_stats()
 
     def _sync(self):
         if not self.enabled:
@@ -35,20 +41,108 @@ class StageProfiler:
         elif torch.cuda.is_available():
             torch.cuda.synchronize()
 
+    def _get_memory_backend(self):
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return torch.npu
+        if torch.cuda.is_available():
+            return torch.cuda
+        return None
+
+    def _memory_call(self, fn_name):
+        backend = self._get_memory_backend()
+        if backend is None:
+            return 0.0
+        fn = getattr(backend, fn_name, None)
+        if fn is None:
+            return 0.0
+        try:
+            return float(fn(self.device))
+        except TypeError:
+            try:
+                return float(fn())
+            except Exception:
+                return 0.0
+        except Exception:
+            return 0.0
+
+    def _get_runtime_memory_bytes(self):
+        alloc = self._memory_call("memory_allocated")
+        reserved = self._memory_call("memory_reserved")
+        if reserved <= 0.0:
+            reserved = alloc
+        return alloc, reserved
+
+    def _get_peak_memory_bytes(self):
+        peak_alloc = self._memory_call("max_memory_allocated")
+        peak_reserved = self._memory_call("max_memory_reserved")
+        if peak_reserved <= 0.0:
+            _, reserved = self._get_runtime_memory_bytes()
+            peak_reserved = reserved
+        return peak_alloc, peak_reserved
+
+    def _reset_peak_memory_stats(self):
+        if not self.enabled:
+            return
+        backend = self._get_memory_backend()
+        if backend is None:
+            return
+        reset_fn = getattr(backend, "reset_peak_memory_stats", None)
+        if callable(reset_fn):
+            try:
+                reset_fn(self.device)
+                return
+            except TypeError:
+                try:
+                    reset_fn()
+                    return
+                except Exception:
+                    return
+            except Exception:
+                return
+
     def start(self):
         if not self.enabled:
             return None
         self._sync()
-        return time.perf_counter()
+        alloc, reserved = self._get_runtime_memory_bytes()
+        return {
+            "ts": time.perf_counter(),
+            "alloc": alloc,
+            "reserved": reserved,
+        }
 
     def stop(self, stage_name, start_time, per_step=False):
         if not self.enabled or start_time is None:
             return 0.0
         self._sync()
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        if isinstance(start_time, dict):
+            start_ts = start_time.get("ts")
+            start_alloc = start_time.get("alloc", 0.0)
+        else:
+            start_ts = start_time
+            start_alloc = None
+
+        elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
         self.stage_totals_ms[stage_name] += elapsed_ms
         if per_step:
             self.step_metrics_ms[stage_name].append(elapsed_ms)
+
+        cur_alloc, cur_reserved = self._get_runtime_memory_bytes()
+        self.stage_peak_alloc_bytes[stage_name] = max(
+            self.stage_peak_alloc_bytes[stage_name], cur_alloc
+        )
+        self.stage_peak_reserved_bytes[stage_name] = max(
+            self.stage_peak_reserved_bytes[stage_name], cur_reserved
+        )
+        if start_alloc is not None:
+            self.stage_peak_delta_alloc_bytes[stage_name] = max(
+                self.stage_peak_delta_alloc_bytes[stage_name],
+                max(cur_alloc - start_alloc, 0.0),
+            )
+
+        peak_alloc, peak_reserved = self._get_peak_memory_bytes()
+        self.request_peak_alloc_bytes = max(self.request_peak_alloc_bytes, peak_alloc)
+        self.request_peak_reserved_bytes = max(self.request_peak_reserved_bytes, peak_reserved)
         return elapsed_ms
 
     def _reduce_scalar(self, value):
@@ -86,12 +180,18 @@ class StageProfiler:
         idx = int((len(sorted_values) - 1) * percentile)
         return sorted_values[idx]
 
+    @staticmethod
+    def _bytes_to_mb(value):
+        return value / (1024.0 * 1024.0)
+
     def report(self):
         if not self.enabled:
             return
 
         stage_summaries = []
         step_summaries = []
+        memory_summaries = []
+        request_memory_summary = None
 
         if self.stage_totals_ms:
             if self.rank == 0:
@@ -105,8 +205,65 @@ class StageProfiler:
                         f"[{self.name} StageProfile] {stage_name}: {max_ms:.3f} / {avg_ms:.3f}"
                     )
 
+        memory_stage_names = sorted(
+            set(self.stage_totals_ms.keys()) | set(self.stage_peak_alloc_bytes.keys())
+        )
+        if memory_stage_names:
+            if self.rank == 0:
+                logging.info(f"[{self.name} StageProfile] ==== Stage Memory (MB, max_rank / avg_rank) ====")
+            for stage_name in memory_stage_names:
+                alloc_peak_mb = self._bytes_to_mb(self.stage_peak_alloc_bytes.get(stage_name, 0.0))
+                reserved_peak_mb = self._bytes_to_mb(
+                    self.stage_peak_reserved_bytes.get(stage_name, 0.0)
+                )
+                delta_alloc_peak_mb = self._bytes_to_mb(
+                    self.stage_peak_delta_alloc_bytes.get(stage_name, 0.0)
+                )
+                alloc_peak_max, alloc_peak_avg = self._reduce_scalar(alloc_peak_mb)
+                reserved_peak_max, reserved_peak_avg = self._reduce_scalar(reserved_peak_mb)
+                delta_alloc_peak_max, delta_alloc_peak_avg = self._reduce_scalar(
+                    delta_alloc_peak_mb
+                )
+                memory_summaries.append(
+                    (
+                        stage_name,
+                        alloc_peak_max,
+                        alloc_peak_avg,
+                        reserved_peak_max,
+                        reserved_peak_avg,
+                        delta_alloc_peak_max,
+                        delta_alloc_peak_avg,
+                    )
+                )
+                if self.rank == 0:
+                    logging.info(
+                        f"[{self.name} StageProfile] {stage_name}: "
+                        f"alloc_peak={alloc_peak_max:.1f}/{alloc_peak_avg:.1f}, "
+                        f"reserved_peak={reserved_peak_max:.1f}/{reserved_peak_avg:.1f}, "
+                        f"delta_alloc_peak={delta_alloc_peak_max:.1f}/{delta_alloc_peak_avg:.1f}"
+                    )
+
+        req_peak_alloc_mb = self._bytes_to_mb(self.request_peak_alloc_bytes)
+        req_peak_reserved_mb = self._bytes_to_mb(self.request_peak_reserved_bytes)
+        req_peak_alloc_max, req_peak_alloc_avg = self._reduce_scalar(req_peak_alloc_mb)
+        req_peak_reserved_max, req_peak_reserved_avg = self._reduce_scalar(req_peak_reserved_mb)
+        request_memory_summary = (
+            req_peak_alloc_max,
+            req_peak_alloc_avg,
+            req_peak_reserved_max,
+            req_peak_reserved_avg,
+        )
+        if self.rank == 0:
+            logging.info(
+                f"[{self.name} StageProfile] request_peak_mem: "
+                f"alloc={req_peak_alloc_max:.1f}/{req_peak_alloc_avg:.1f}, "
+                f"reserved={req_peak_reserved_max:.1f}/{req_peak_reserved_avg:.1f} MB"
+            )
+
         if not self.step_metrics_ms:
-            self._append_report_file(stage_summaries, step_summaries)
+            self._append_report_file(
+                stage_summaries, step_summaries, memory_summaries, request_memory_summary
+            )
             return
 
         if self.rank == 0:
@@ -151,9 +308,17 @@ class StageProfiler:
                     f"[{self.name} StageProfile] {metric_name} slowest {self.top_k}: {slowest_str}"
                 )
 
-        self._append_report_file(stage_summaries, step_summaries)
+        self._append_report_file(
+            stage_summaries, step_summaries, memory_summaries, request_memory_summary
+        )
 
-    def _append_report_file(self, stage_summaries, step_summaries):
+    def _append_report_file(
+        self,
+        stage_summaries,
+        step_summaries,
+        memory_summaries,
+        request_memory_summary,
+    ):
         if self.rank != 0 or not self.output_file:
             return
         try:
@@ -167,6 +332,34 @@ class StageProfiler:
                 f.write(f"RUN,{ts},{self.name},world_size={world_size}\n")
                 for stage_name, max_ms, avg_ms in stage_summaries:
                     f.write(f"TOTAL,{stage_name},{max_ms:.3f},{avg_ms:.3f}\n")
+                for (
+                    stage_name,
+                    alloc_peak_max,
+                    alloc_peak_avg,
+                    reserved_peak_max,
+                    reserved_peak_avg,
+                    delta_alloc_peak_max,
+                    delta_alloc_peak_avg,
+                ) in memory_summaries:
+                    f.write(
+                        "MEM,"
+                        f"{stage_name},"
+                        f"{alloc_peak_max:.3f},{alloc_peak_avg:.3f},"
+                        f"{reserved_peak_max:.3f},{reserved_peak_avg:.3f},"
+                        f"{delta_alloc_peak_max:.3f},{delta_alloc_peak_avg:.3f}\n"
+                    )
+                if request_memory_summary is not None:
+                    (
+                        req_peak_alloc_max,
+                        req_peak_alloc_avg,
+                        req_peak_reserved_max,
+                        req_peak_reserved_avg,
+                    ) = request_memory_summary
+                    f.write(
+                        "MEM_REQUEST,"
+                        f"{req_peak_alloc_max:.3f},{req_peak_alloc_avg:.3f},"
+                        f"{req_peak_reserved_max:.3f},{req_peak_reserved_avg:.3f}\n"
+                    )
                 for (
                     metric_name,
                     avg_ms,
