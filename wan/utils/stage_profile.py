@@ -48,6 +48,37 @@ class StageProfiler:
             return torch.cuda
         return None
 
+    def _get_device_index(self):
+        device = self.device
+        if isinstance(device, int):
+            return device
+        if isinstance(device, torch.device):
+            if device.index is not None:
+                return int(device.index)
+            return None
+        if isinstance(device, str):
+            if ":" in device:
+                try:
+                    return int(device.split(":")[-1])
+                except Exception:
+                    return None
+            return None
+        return None
+
+    def _iter_device_args(self):
+        args = []
+        device_index = self._get_device_index()
+        if device_index is not None:
+            args.append((device_index,))
+        if isinstance(self.device, torch.device):
+            args.append((self.device,))
+        args.append(tuple())
+        seen = set()
+        for item in args:
+            if item not in seen:
+                seen.add(item)
+                yield item
+
     def _memory_call(self, fn_name):
         backend = self._get_memory_backend()
         if backend is None:
@@ -55,26 +86,99 @@ class StageProfiler:
         fn = getattr(backend, fn_name, None)
         if fn is None:
             return 0.0
-        try:
-            return float(fn(self.device))
-        except TypeError:
+        for args in self._iter_device_args():
             try:
-                return float(fn())
+                return float(fn(*args))
             except Exception:
-                return 0.0
-        except Exception:
+                continue
+        return 0.0
+
+    def _memory_stats(self):
+        backend = self._get_memory_backend()
+        if backend is None:
+            return None
+        stats_fn = getattr(backend, "memory_stats", None)
+        if not callable(stats_fn):
+            return None
+        for args in self._iter_device_args():
+            try:
+                stats = stats_fn(*args)
+                if isinstance(stats, dict):
+                    return stats
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _stats_value(stats, keys):
+        if not stats:
             return 0.0
+        for key in keys:
+            value = stats.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 0.0
 
     def _get_runtime_memory_bytes(self):
-        alloc = self._memory_call("memory_allocated")
-        reserved = self._memory_call("memory_reserved")
+        stats = self._memory_stats()
+        alloc = self._stats_value(
+            stats,
+            [
+                "allocated_bytes.all.current",
+                "allocated_bytes.current",
+                "active_bytes.all.current",
+                "active_bytes.current",
+            ],
+        )
+        reserved = self._stats_value(
+            stats,
+            [
+                "reserved_bytes.all.current",
+                "reserved_bytes.current",
+                "segment_bytes.all.current",
+                "segment_bytes.current",
+            ],
+        )
+        if alloc <= 0.0:
+            alloc = self._memory_call("memory_allocated")
+        if reserved <= 0.0:
+            reserved = self._memory_call("memory_reserved")
+        if reserved <= 0.0:
+            reserved = self._memory_call("memory_cached")
         if reserved <= 0.0:
             reserved = alloc
         return alloc, reserved
 
     def _get_peak_memory_bytes(self):
-        peak_alloc = self._memory_call("max_memory_allocated")
-        peak_reserved = self._memory_call("max_memory_reserved")
+        stats = self._memory_stats()
+        peak_alloc = self._stats_value(
+            stats,
+            [
+                "allocated_bytes.all.peak",
+                "allocated_bytes.peak",
+                "active_bytes.all.peak",
+                "active_bytes.peak",
+            ],
+        )
+        peak_reserved = self._stats_value(
+            stats,
+            [
+                "reserved_bytes.all.peak",
+                "reserved_bytes.peak",
+                "segment_bytes.all.peak",
+                "segment_bytes.peak",
+            ],
+        )
+        if peak_alloc <= 0.0:
+            peak_alloc = self._memory_call("max_memory_allocated")
+        if peak_reserved <= 0.0:
+            peak_reserved = self._memory_call("max_memory_reserved")
+        if peak_reserved <= 0.0:
+            peak_reserved = self._memory_call("max_memory_cached")
         if peak_reserved <= 0.0:
             _, reserved = self._get_runtime_memory_bytes()
             peak_reserved = reserved
@@ -88,17 +192,28 @@ class StageProfiler:
             return
         reset_fn = getattr(backend, "reset_peak_memory_stats", None)
         if callable(reset_fn):
-            try:
-                reset_fn(self.device)
-                return
-            except TypeError:
+            for args in self._iter_device_args():
                 try:
-                    reset_fn()
+                    reset_fn(*args)
                     return
                 except Exception:
-                    return
-            except Exception:
-                return
+                    continue
+        reset_alloc = getattr(backend, "reset_max_memory_allocated", None)
+        if callable(reset_alloc):
+            for args in self._iter_device_args():
+                try:
+                    reset_alloc(*args)
+                    break
+                except Exception:
+                    continue
+        reset_reserved = getattr(backend, "reset_max_memory_reserved", None)
+        if callable(reset_reserved):
+            for args in self._iter_device_args():
+                try:
+                    reset_reserved(*args)
+                    break
+                except Exception:
+                    continue
 
     def start(self):
         if not self.enabled:
