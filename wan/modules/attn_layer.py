@@ -5,6 +5,7 @@ import torch_npu
 import torch.distributed as dist
 import math
 import os
+import time
 from yunchang import LongContextAttention
 try:
     from yunchang.kernels import AttnType
@@ -235,6 +236,26 @@ class xFuserLongContextAttention(LongContextAttention):
             if profiler is not None:
                 profiler.stop(stage_name, start_time, step_idx=t_idx)
 
+        def profile_collective_skew(stage_name, launch_time, end_time, group):
+            if profiler is not None and hasattr(profiler, "record_collective_skew"):
+                profiler.record_collective_skew(
+                    stage_name=stage_name,
+                    launch_time=launch_time,
+                    end_time=end_time,
+                    group=group,
+                    step_idx=t_idx,
+                )
+
+        def profile_op_skew(stage_name, launch_time, end_time, group):
+            if profiler is not None and hasattr(profiler, "record_op_skew"):
+                profiler.record_op_skew(
+                    stage_name=stage_name,
+                    launch_time=launch_time,
+                    end_time=end_time,
+                    group=group,
+                    step_idx=t_idx,
+                )
+
         total_start = profile_start()
 
         use_packed_qkv_a2a = os.getenv("WAN_PACKED_QKV_A2A", "1") != "0"
@@ -267,10 +288,14 @@ class xFuserLongContextAttention(LongContextAttention):
         if use_packed_qkv_a2a:
             _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
+            c0 = time.perf_counter()
             qkv = torch.cat([query, key, value], dim=-1)
+            c1 = time.perf_counter()
             profile_stop("qkv_concat", t0)
+            profile_op_skew("qkv_concat", c0, c1, self.ulysses_pg)
 
             t0 = profile_start()
+            c0 = time.perf_counter()
             qkv_layer = _all_to_all_with_event_gate(
                 input_=qkv,
                 scatter_idx=2,
@@ -279,19 +304,25 @@ class xFuserLongContextAttention(LongContextAttention):
                 enable_event_gate=a2a_event_gate_enabled,
                 record_as_last_a2a=False,
             )
+            c1 = time.perf_counter()
             profile_stop("qkv_all_to_all", t0)
+            profile_collective_skew("qkv_all_to_all", c0, c1, self.ulysses_pg)
 
             t0 = profile_start()
             q_dim = query.shape[-1]
             k_dim = key.shape[-1]
             v_dim = value.shape[-1]
+            c0 = time.perf_counter()
             query_layer, key_layer, value_layer = torch.split(
                 qkv_layer, [q_dim, k_dim, v_dim], dim=-1
             )
+            c1 = time.perf_counter()
             profile_stop("qkv_split", t0)
+            profile_op_skew("qkv_split", c0, c1, self.ulysses_pg)
         else:
             _device_sync_if_needed(fence_before_qkv)
             t0 = profile_start()
+            c0 = time.perf_counter()
             query_layer = _all_to_all_with_event_gate(
                 input_=query,
                 scatter_idx=2,
@@ -300,10 +331,13 @@ class xFuserLongContextAttention(LongContextAttention):
                 enable_event_gate=a2a_event_gate_enabled,
                 record_as_last_a2a=False,
             )
+            c1 = time.perf_counter()
             profile_stop("q_all_to_all", t0)
+            profile_collective_skew("q_all_to_all", c0, c1, self.ulysses_pg)
 
             _device_sync_if_needed(fence_full)
             t0 = profile_start()
+            c0 = time.perf_counter()
             key_layer = _all_to_all_with_event_gate(
                 input_=key,
                 scatter_idx=2,
@@ -312,10 +346,13 @@ class xFuserLongContextAttention(LongContextAttention):
                 enable_event_gate=a2a_event_gate_enabled,
                 record_as_last_a2a=False,
             )
+            c1 = time.perf_counter()
             profile_stop("k_all_to_all", t0)
+            profile_collective_skew("k_all_to_all", c0, c1, self.ulysses_pg)
 
             _device_sync_if_needed(fence_full)
             t0 = profile_start()
+            c0 = time.perf_counter()
             value_layer = _all_to_all_with_event_gate(
                 input_=value,
                 scatter_idx=2,
@@ -324,24 +361,33 @@ class xFuserLongContextAttention(LongContextAttention):
                 enable_event_gate=a2a_event_gate_enabled,
                 record_as_last_a2a=False,
             )
+            c1 = time.perf_counter()
             profile_stop("v_all_to_all", t0)
+            profile_collective_skew("v_all_to_all", c0, c1, self.ulysses_pg)
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size
             b, s, n, d = key_layer.shape
             k_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
             t0 = profile_start()
+            c0 = time.perf_counter()
             dist.all_gather_into_tensor(k_full, key_layer, group=self.ring_pg)
+            c1 = time.perf_counter()
             key_layer = k_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
             profile_stop("kv_ring_k_all_gather", t0)
+            profile_collective_skew("kv_ring_k_all_gather", c0, c1, self.ring_pg)
 
             v_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
             t0 = profile_start()
+            c0 = time.perf_counter()
             dist.all_gather_into_tensor(v_full, value_layer, group=self.ring_pg)
+            c1 = time.perf_counter()
             value_layer = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
             profile_stop("kv_ring_v_all_gather", t0)
+            profile_collective_skew("kv_ring_v_all_gather", c0, c1, self.ring_pg)
 
         t0 = profile_start()
+        c0 = time.perf_counter()
         if self.rainfusion_config is not None:
             out = self.rainfusion_fa(
                 query_layer,
@@ -378,7 +424,9 @@ class xFuserLongContextAttention(LongContextAttention):
 
                 output.append(out)
             out = torch.cat(output, dim=2)
+        c1 = time.perf_counter()
         profile_stop("attn_kernel", t0)
+        profile_op_skew("attn_kernel", c0, c1, self.ulysses_pg)
 
         if type(out) == tuple:
             context_layer, _, _ = out
@@ -389,6 +437,7 @@ class xFuserLongContextAttention(LongContextAttention):
         # scatter 1, gather 2
         _device_sync_if_needed(fence_full)
         t0 = profile_start()
+        c0 = time.perf_counter()
         output = _all_to_all_with_event_gate(
             input_=context_layer,
             scatter_idx=1,
@@ -397,7 +446,9 @@ class xFuserLongContextAttention(LongContextAttention):
             enable_event_gate=a2a_event_gate_enabled,
             record_as_last_a2a=True,
         )
+        c1 = time.perf_counter()
         profile_stop("out_all_to_all", t0)
+        profile_collective_skew("out_all_to_all", c0, c1, self.ulysses_pg)
         profile_stop("attn_forward_total", total_start)
 
         return output

@@ -23,6 +23,82 @@ class AttentionProfiler:
         self.stage_counts = defaultdict(int)
         self.stage_max_call_ms = defaultdict(float)
         self.step_stage_totals_ms = defaultdict(lambda: defaultdict(float))
+        self.collective_diag_enabled = self._resolve_collective_diag_enabled()
+        self.collective_diag_every_step = self._resolve_positive_int_env(
+            "WAN_SLOW_CARD_DIAG_EVERY_STEP", default_value=1
+        )
+        self.collective_diag_max_calls = self._resolve_non_negative_int_env(
+            "WAN_SLOW_CARD_DIAG_MAX_CALLS", default_value=0
+        )
+        self.collective_diag_stage_filter = self._resolve_stage_filter()
+        self.collective_launch_skew_ms = defaultdict(list)
+        self.collective_finish_skew_ms = defaultdict(list)
+        self.collective_duration_avg_ms = defaultdict(list)
+        self.collective_duration_max_ms = defaultdict(list)
+        self.collective_duration_min_ms = defaultdict(list)
+        self.collective_late_rank_counts = defaultdict(lambda: defaultdict(int))
+        self.op_diag_enabled = self._resolve_op_diag_enabled()
+        self.op_diag_every_step = self._resolve_positive_int_env(
+            "WAN_SLOW_CARD_OP_DIAG_EVERY_STEP", default_value=1
+        )
+        self.op_diag_max_calls = self._resolve_non_negative_int_env(
+            "WAN_SLOW_CARD_OP_DIAG_MAX_CALLS", default_value=0
+        )
+        self.op_diag_stage_filter = self._resolve_op_stage_filter()
+        self.op_launch_skew_ms = defaultdict(list)
+        self.op_finish_skew_ms = defaultdict(list)
+        self.op_duration_avg_ms = defaultdict(list)
+        self.op_duration_max_ms = defaultdict(list)
+        self.op_duration_min_ms = defaultdict(list)
+        self.op_slowest_rank_counts = defaultdict(lambda: defaultdict(int))
+
+    @staticmethod
+    def _resolve_collective_diag_enabled():
+        raw = os.getenv("WAN_SLOW_CARD_DIAG", "0").strip().lower()
+        return raw not in ("", "0", "off", "false", "no")
+
+    @staticmethod
+    def _resolve_op_diag_enabled():
+        raw = os.getenv("WAN_SLOW_CARD_OP_DIAG", "0").strip().lower()
+        return raw not in ("", "0", "off", "false", "no")
+
+    @staticmethod
+    def _resolve_positive_int_env(env_name, default_value):
+        raw = os.getenv(env_name, str(default_value)).strip()
+        if raw == "":
+            return default_value
+        try:
+            value = int(raw)
+        except Exception:
+            return default_value
+        return value if value > 0 else default_value
+
+    @staticmethod
+    def _resolve_non_negative_int_env(env_name, default_value):
+        raw = os.getenv(env_name, str(default_value)).strip()
+        if raw == "":
+            return default_value
+        try:
+            value = int(raw)
+        except Exception:
+            return default_value
+        return value if value >= 0 else default_value
+
+    @staticmethod
+    def _resolve_stage_filter():
+        raw = os.getenv("WAN_SLOW_CARD_DIAG_STAGES", "").strip()
+        if not raw:
+            return None
+        stages = {item.strip() for item in raw.split(",") if item.strip()}
+        return stages if stages else None
+
+    @staticmethod
+    def _resolve_op_stage_filter():
+        raw = os.getenv("WAN_SLOW_CARD_OP_DIAG_STAGES", "").strip()
+        if not raw:
+            return {"attn_kernel"}
+        stages = {item.strip() for item in raw.split(",") if item.strip()}
+        return stages if stages else {"attn_kernel"}
 
     def _sync(self):
         if not self.enabled:
@@ -55,6 +131,144 @@ class AttentionProfiler:
             except Exception:
                 pass
         return elapsed_ms
+
+    def _should_collective_diag(self, stage_name, step_idx):
+        if not self.enabled or not self.collective_diag_enabled:
+            return False
+        if not dist.is_initialized():
+            return False
+        if self.collective_diag_stage_filter is not None and stage_name not in self.collective_diag_stage_filter:
+            return False
+        if self.collective_diag_max_calls > 0:
+            sampled = len(self.collective_launch_skew_ms.get(stage_name, []))
+            if sampled >= self.collective_diag_max_calls:
+                return False
+        try:
+            step_id = int(step_idx)
+        except Exception:
+            step_id = -1
+        if step_id >= 0 and self.collective_diag_every_step > 1:
+            if (step_id % self.collective_diag_every_step) != 0:
+                return False
+        return True
+
+    def _should_op_diag(self, stage_name, step_idx):
+        if not self.enabled or not self.op_diag_enabled:
+            return False
+        if not dist.is_initialized():
+            return False
+        if self.op_diag_stage_filter is not None and stage_name not in self.op_diag_stage_filter:
+            return False
+        if self.op_diag_max_calls > 0:
+            sampled = len(self.op_launch_skew_ms.get(stage_name, []))
+            if sampled >= self.op_diag_max_calls:
+                return False
+        try:
+            step_id = int(step_idx)
+        except Exception:
+            step_id = -1
+        if step_id >= 0 and self.op_diag_every_step > 1:
+            if (step_id % self.op_diag_every_step) != 0:
+                return False
+        return True
+
+    def record_collective_skew(self, stage_name, launch_time, end_time, group=None, step_idx=None):
+        if not self._should_collective_diag(stage_name, step_idx):
+            return
+        if launch_time is None or end_time is None:
+            return
+        try:
+            launch_ms = float(launch_time) * 1000.0
+            finish_ms = float(end_time) * 1000.0
+            duration_ms = max(finish_ms - launch_ms, 0.0)
+            world_size = dist.get_world_size(group=group)
+            rank_global = dist.get_rank()
+            local_tensor = torch.tensor(
+                [launch_ms, finish_ms, duration_ms, float(rank_global)],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+            dist.all_gather(gather_list, local_tensor, group=group)
+
+            group_rank = dist.get_rank(group=group)
+            if group_rank != 0:
+                return
+
+            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu()
+            launch_vals = gather_tensor[:, 0]
+            finish_vals = gather_tensor[:, 1]
+            dur_vals = gather_tensor[:, 2]
+            rank_vals = gather_tensor[:, 3].to(torch.int64)
+
+            launch_skew = float(launch_vals.max().item() - launch_vals.min().item())
+            finish_skew = float(finish_vals.max().item() - finish_vals.min().item())
+            dur_avg = float(dur_vals.mean().item())
+            dur_max = float(dur_vals.max().item())
+            dur_min = float(dur_vals.min().item())
+            latest_idx = int(torch.argmax(launch_vals).item())
+            latest_rank = int(rank_vals[latest_idx].item())
+
+            self.collective_launch_skew_ms[stage_name].append(launch_skew)
+            self.collective_finish_skew_ms[stage_name].append(finish_skew)
+            self.collective_duration_avg_ms[stage_name].append(dur_avg)
+            self.collective_duration_max_ms[stage_name].append(dur_max)
+            self.collective_duration_min_ms[stage_name].append(dur_min)
+            self.collective_late_rank_counts[stage_name][latest_rank] += 1
+        except Exception as exc:
+            if self.rank == 0:
+                logging.warning(
+                    f"[{self.name} AttnProfile] failed to collect slow-card diag for {stage_name}: {exc}"
+                )
+
+    def record_op_skew(self, stage_name, launch_time, end_time, group=None, step_idx=None):
+        if not self._should_op_diag(stage_name, step_idx):
+            return
+        if launch_time is None or end_time is None:
+            return
+        try:
+            launch_ms = float(launch_time) * 1000.0
+            finish_ms = float(end_time) * 1000.0
+            duration_ms = max(finish_ms - launch_ms, 0.0)
+            world_size = dist.get_world_size(group=group)
+            rank_global = dist.get_rank()
+            local_tensor = torch.tensor(
+                [launch_ms, finish_ms, duration_ms, float(rank_global)],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+            dist.all_gather(gather_list, local_tensor, group=group)
+
+            group_rank = dist.get_rank(group=group)
+            if group_rank != 0:
+                return
+
+            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu()
+            launch_vals = gather_tensor[:, 0]
+            finish_vals = gather_tensor[:, 1]
+            dur_vals = gather_tensor[:, 2]
+            rank_vals = gather_tensor[:, 3].to(torch.int64)
+
+            launch_skew = float(launch_vals.max().item() - launch_vals.min().item())
+            finish_skew = float(finish_vals.max().item() - finish_vals.min().item())
+            dur_avg = float(dur_vals.mean().item())
+            dur_max = float(dur_vals.max().item())
+            dur_min = float(dur_vals.min().item())
+            slowest_idx = int(torch.argmax(dur_vals).item())
+            slowest_rank = int(rank_vals[slowest_idx].item())
+
+            self.op_launch_skew_ms[stage_name].append(launch_skew)
+            self.op_finish_skew_ms[stage_name].append(finish_skew)
+            self.op_duration_avg_ms[stage_name].append(dur_avg)
+            self.op_duration_max_ms[stage_name].append(dur_max)
+            self.op_duration_min_ms[stage_name].append(dur_min)
+            self.op_slowest_rank_counts[stage_name][slowest_rank] += 1
+        except Exception as exc:
+            if self.rank == 0:
+                logging.warning(
+                    f"[{self.name} AttnProfile] failed to collect op slow-card diag for {stage_name}: {exc}"
+                )
 
     def _reduce_stage(self, total_ms, count, max_call_ms):
         if not dist.is_initialized():
@@ -176,7 +390,76 @@ class AttentionProfiler:
                     f"[{self.name} AttnProfile] {metric_name} slowest {self.top_k}: {slowest_str}"
                 )
 
-        self._append_report_file(summaries, ratio_summaries, step_summaries)
+        collective_diag_summaries = self._build_collective_diag_summaries()
+        if self.rank == 0 and collective_diag_summaries:
+            logging.info(f"[{self.name} AttnProfile] ==== Slow-Card Collective Launch Skew (ms) ====")
+            for (
+                stage_name,
+                calls,
+                launch_avg,
+                launch_p90,
+                launch_max,
+                finish_avg,
+                finish_p90,
+                finish_max,
+                dur_avg,
+                dur_max,
+                dur_min,
+                top_late_ranks,
+            ) in collective_diag_summaries:
+                logging.info(
+                    f"[{self.name} AttnProfile] {stage_name}: "
+                    f"calls={calls}, launch_skew(avg/p90/max)={launch_avg:.3f}/{launch_p90:.3f}/{launch_max:.3f}, "
+                    f"finish_skew(avg/p90/max)={finish_avg:.3f}/{finish_p90:.3f}/{finish_max:.3f}, "
+                    f"dur(avg/max/min)={dur_avg:.3f}/{dur_max:.3f}/{dur_min:.3f}"
+                )
+                if top_late_ranks:
+                    late_rank_str = ", ".join(
+                        [f"rank{rank}:{cnt}" for rank, cnt in top_late_ranks]
+                    )
+                    logging.info(
+                        f"[{self.name} AttnProfile] {stage_name} latest-launch rank top: {late_rank_str}"
+                    )
+
+        op_diag_summaries = self._build_op_diag_summaries()
+        if self.rank == 0 and op_diag_summaries:
+            logging.info(f"[{self.name} AttnProfile] ==== Slow-Card Compute Op Skew (ms) ====")
+            for (
+                stage_name,
+                calls,
+                launch_avg,
+                launch_p90,
+                launch_max,
+                finish_avg,
+                finish_p90,
+                finish_max,
+                dur_avg,
+                dur_p90,
+                dur_max,
+                dur_min,
+                top_slowest_ranks,
+            ) in op_diag_summaries:
+                logging.info(
+                    f"[{self.name} AttnProfile] {stage_name}: "
+                    f"calls={calls}, launch_skew(avg/p90/max)={launch_avg:.3f}/{launch_p90:.3f}/{launch_max:.3f}, "
+                    f"finish_skew(avg/p90/max)={finish_avg:.3f}/{finish_p90:.3f}/{finish_max:.3f}, "
+                    f"dur(avg/p90/max/min)={dur_avg:.3f}/{dur_p90:.3f}/{dur_max:.3f}/{dur_min:.3f}"
+                )
+                if top_slowest_ranks:
+                    slow_rank_str = ", ".join(
+                        [f"rank{rank}:{cnt}" for rank, cnt in top_slowest_ranks]
+                    )
+                    logging.info(
+                        f"[{self.name} AttnProfile] {stage_name} slowest-rank top: {slow_rank_str}"
+                    )
+
+        self._append_report_file(
+            summaries,
+            ratio_summaries,
+            step_summaries,
+            collective_diag_summaries,
+            op_diag_summaries,
+        )
 
     @staticmethod
     def _sum_stage(summary_map, stage_names):
@@ -297,7 +580,110 @@ class AttentionProfiler:
             )
         return step_summaries
 
-    def _append_report_file(self, summaries, ratio_summaries, step_summaries):
+    def _build_collective_diag_summaries(self):
+        if not self.collective_launch_skew_ms:
+            return []
+
+        output = []
+        for stage_name in sorted(self.collective_launch_skew_ms.keys()):
+            launch_vals = self.collective_launch_skew_ms.get(stage_name, [])
+            finish_vals = self.collective_finish_skew_ms.get(stage_name, [])
+            dur_avg_vals = self.collective_duration_avg_ms.get(stage_name, [])
+            dur_max_vals = self.collective_duration_max_ms.get(stage_name, [])
+            dur_min_vals = self.collective_duration_min_ms.get(stage_name, [])
+            if not launch_vals or not finish_vals:
+                continue
+
+            calls = len(launch_vals)
+            launch_avg = sum(launch_vals) / calls
+            launch_p90 = self._percentile(launch_vals, 0.90)
+            launch_max = max(launch_vals)
+            finish_avg = sum(finish_vals) / len(finish_vals)
+            finish_p90 = self._percentile(finish_vals, 0.90)
+            finish_max = max(finish_vals)
+            dur_avg = sum(dur_avg_vals) / max(len(dur_avg_vals), 1)
+            dur_max = max(dur_max_vals) if dur_max_vals else 0.0
+            dur_min = min(dur_min_vals) if dur_min_vals else 0.0
+            top_late_ranks = sorted(
+                self.collective_late_rank_counts.get(stage_name, {}).items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )[: self.top_k]
+            output.append(
+                (
+                    stage_name,
+                    calls,
+                    launch_avg,
+                    launch_p90,
+                    launch_max,
+                    finish_avg,
+                    finish_p90,
+                    finish_max,
+                    dur_avg,
+                    dur_max,
+                    dur_min,
+                    top_late_ranks,
+                )
+            )
+        return output
+
+    def _build_op_diag_summaries(self):
+        if not self.op_launch_skew_ms:
+            return []
+
+        output = []
+        for stage_name in sorted(self.op_launch_skew_ms.keys()):
+            launch_vals = self.op_launch_skew_ms.get(stage_name, [])
+            finish_vals = self.op_finish_skew_ms.get(stage_name, [])
+            dur_avg_vals = self.op_duration_avg_ms.get(stage_name, [])
+            dur_max_vals = self.op_duration_max_ms.get(stage_name, [])
+            dur_min_vals = self.op_duration_min_ms.get(stage_name, [])
+            if not launch_vals or not finish_vals or not dur_max_vals:
+                continue
+
+            calls = len(launch_vals)
+            launch_avg = sum(launch_vals) / calls
+            launch_p90 = self._percentile(launch_vals, 0.90)
+            launch_max = max(launch_vals)
+            finish_avg = sum(finish_vals) / len(finish_vals)
+            finish_p90 = self._percentile(finish_vals, 0.90)
+            finish_max = max(finish_vals)
+            dur_avg = sum(dur_avg_vals) / max(len(dur_avg_vals), 1)
+            dur_p90 = self._percentile(dur_max_vals, 0.90)
+            dur_max = max(dur_max_vals)
+            dur_min = min(dur_min_vals) if dur_min_vals else 0.0
+            top_slowest_ranks = sorted(
+                self.op_slowest_rank_counts.get(stage_name, {}).items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )[: self.top_k]
+            output.append(
+                (
+                    stage_name,
+                    calls,
+                    launch_avg,
+                    launch_p90,
+                    launch_max,
+                    finish_avg,
+                    finish_p90,
+                    finish_max,
+                    dur_avg,
+                    dur_p90,
+                    dur_max,
+                    dur_min,
+                    top_slowest_ranks,
+                )
+            )
+        return output
+
+    def _append_report_file(
+        self,
+        summaries,
+        ratio_summaries,
+        step_summaries,
+        collective_diag_summaries,
+        op_diag_summaries,
+    ):
         if self.rank != 0 or not self.output_file:
             return
         try:
@@ -336,6 +722,55 @@ class AttentionProfiler:
                     )
                     slowest_str = ";".join([f"step{idx}:{val:.3f}" for idx, val in slowest])
                     f.write(f"ATTN_SLOW,{metric_name},{slowest_str}\n")
+                for (
+                    stage_name,
+                    calls,
+                    launch_avg,
+                    launch_p90,
+                    launch_max,
+                    finish_avg,
+                    finish_p90,
+                    finish_max,
+                    dur_avg,
+                    dur_max,
+                    dur_min,
+                    top_late_ranks,
+                ) in collective_diag_summaries:
+                    f.write(
+                        "ATTN_SKEW,"
+                        f"{stage_name},"
+                        f"{calls},"
+                        f"{launch_avg:.3f},{launch_p90:.3f},{launch_max:.3f},"
+                        f"{finish_avg:.3f},{finish_p90:.3f},{finish_max:.3f},"
+                        f"{dur_avg:.3f},{dur_max:.3f},{dur_min:.3f}\n"
+                    )
+                    late_rank_str = ";".join([f"rank{rank}:{cnt}" for rank, cnt in top_late_ranks])
+                    f.write(f"ATTN_SKEW_RANK,{stage_name},{late_rank_str}\n")
+                for (
+                    stage_name,
+                    calls,
+                    launch_avg,
+                    launch_p90,
+                    launch_max,
+                    finish_avg,
+                    finish_p90,
+                    finish_max,
+                    dur_avg,
+                    dur_p90,
+                    dur_max,
+                    dur_min,
+                    top_slowest_ranks,
+                ) in op_diag_summaries:
+                    f.write(
+                        "ATTN_OP_SKEW,"
+                        f"{stage_name},"
+                        f"{calls},"
+                        f"{launch_avg:.3f},{launch_p90:.3f},{launch_max:.3f},"
+                        f"{finish_avg:.3f},{finish_p90:.3f},{finish_max:.3f},"
+                        f"{dur_avg:.3f},{dur_p90:.3f},{dur_max:.3f},{dur_min:.3f}\n"
+                    )
+                    slow_rank_str = ";".join([f"rank{rank}:{cnt}" for rank, cnt in top_slowest_ranks])
+                    f.write(f"ATTN_OP_SKEW_RANK,{stage_name},{slow_rank_str}\n")
                 f.write("ATTN_END\n")
         except Exception as exc:
             logging.warning(
