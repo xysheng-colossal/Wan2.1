@@ -118,7 +118,10 @@
 - 固定 prompt（后续对比统一使用）：
   `A young boy with short brown hair, dressed in a dark blue t-shirt and red pants, is seen playing a KAWAI upright piano with skill and concentration. The piano's glossy black surface reflects the room's lighting, and its white and black keys are arranged in a standard layout, indicating a scene of musical practice or learning. The boy's hands move over the keys, suggesting he is engaged in playing or practicing a piece.`
 
-## 8. 标准运行模板（20-step，详细 profile）
+## 8. 标准运行模板（20-step，仅工具耗时）
+- 原则：性能对比默认**关闭直接 profile**（`--profile_stage/--profile_attn/--profile_mode`），避免 `sync` 对时延分析造成干扰。
+- 统一使用工具计时（`/usr/bin/time`）统计端到端耗时。
+
 ```bash
 docker exec -i mindie-wan2.1-xysheng bash -lc "
 set -euo pipefail
@@ -131,6 +134,9 @@ WAN_FSDP_ALLGATHER_WAIT_A2A=0 \
 WAN_FSDP_RESHARD_AFTER_FORWARD=1 \
 WAN_FSDP_BLOCK_GROUP_SIZE=1 \
 WAN_FSDP_WRAP_MODE=block \
+WAN_SLOW_CARD_DIAG=0 \
+WAN_SLOW_CARD_OP_DIAG=0 \
+/usr/bin/time -f \"REAL_TIME_SECONDS=%e\" -o runtime_fsdp_baseline_20_fixedprompt.txt \
 torchrun --nproc_per_node=4 generate.py \
   --task t2v-14B \
   --size 832*480 \
@@ -141,20 +147,10 @@ torchrun --nproc_per_node=4 generate.py \
   --sample_steps 20 \
   --ulysses_size 4 \
   --vae_parallel \
-  --profile_stage \
-  --profile_attn \
-  --profile_mode detailed \
-  --profile_mode_dir result_profile_fsdp_baseline_20_fixedprompt \
-  --profile_mode_steps 1 \
-  --profile_mode_wait 0 \
-  --profile_mode_warmup 0 \
-  --profile_mode_active 1 \
-  --profile_mode_repeat 1 \
-  --profile_mode_skip_first 0 \
-  --profile_stage_file perf_fsdp_baseline_20_fixedprompt_detailed.csv \
   --serialize_comm \
-  --prompt \"\${prompt_fixed}\" > run_fsdp_baseline_20_fixedprompt_detailed.log 2>&1
-grep -E "request_total:|denoise_step_total: avg=|attn_kernel: avg=|comm_total: avg=|qkv_all_to_all: avg=|out_all_to_all: avg=|Generating video used time|ProfileMode:detailed" run_fsdp_baseline_20_fixedprompt_detailed.log | tail -n 80
+  --prompt \"\${prompt_fixed}\" > run_fsdp_baseline_20_fixedprompt_runtime.log 2>&1
+tail -n 20 runtime_fsdp_baseline_20_fixedprompt.txt
+grep -E \"Generating video used time|Finished\\.\" run_fsdp_baseline_20_fixedprompt_runtime.log | tail -n 20
 "
 ```
 
