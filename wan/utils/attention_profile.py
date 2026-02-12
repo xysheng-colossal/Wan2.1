@@ -183,7 +183,7 @@ class AttentionProfiler:
             rank_global = dist.get_rank()
             local_tensor = torch.tensor(
                 [launch_ms, finish_ms, duration_ms, float(rank_global)],
-                dtype=torch.float32,
+                dtype=torch.float64,
                 device=self.device,
             )
             gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
@@ -236,7 +236,7 @@ class AttentionProfiler:
             rank_global = dist.get_rank()
             local_tensor = torch.tensor(
                 [launch_ms, finish_ms, duration_ms, float(rank_global)],
-                dtype=torch.float32,
+                dtype=torch.float64,
                 device=self.device,
             )
             gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
