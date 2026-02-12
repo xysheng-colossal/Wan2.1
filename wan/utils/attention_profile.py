@@ -176,14 +176,14 @@ class AttentionProfiler:
         if launch_time is None or end_time is None:
             return
         try:
-            launch_ms = float(launch_time) * 1000.0
-            finish_ms = float(end_time) * 1000.0
-            duration_ms = max(finish_ms - launch_ms, 0.0)
+            launch_us = int(round(float(launch_time) * 1_000_000.0))
+            finish_us = int(round(float(end_time) * 1_000_000.0))
+            duration_us = max(finish_us - launch_us, 0)
             world_size = dist.get_world_size(group=group)
             rank_global = dist.get_rank()
             local_tensor = torch.tensor(
-                [launch_ms, finish_ms, duration_ms, float(rank_global)],
-                dtype=torch.float64,
+                [launch_us, finish_us, duration_us, int(rank_global)],
+                dtype=torch.int64,
                 device=self.device,
             )
             gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
@@ -193,17 +193,17 @@ class AttentionProfiler:
             if group_rank != 0:
                 return
 
-            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu()
-            launch_vals = gather_tensor[:, 0]
-            finish_vals = gather_tensor[:, 1]
-            dur_vals = gather_tensor[:, 2]
-            rank_vals = gather_tensor[:, 3].to(torch.int64)
+            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu().to(torch.int64)
+            launch_vals = gather_tensor[:, 0].to(torch.float64)
+            finish_vals = gather_tensor[:, 1].to(torch.float64)
+            dur_vals = gather_tensor[:, 2].to(torch.float64)
+            rank_vals = gather_tensor[:, 3]
 
-            launch_skew = float(launch_vals.max().item() - launch_vals.min().item())
-            finish_skew = float(finish_vals.max().item() - finish_vals.min().item())
-            dur_avg = float(dur_vals.mean().item())
-            dur_max = float(dur_vals.max().item())
-            dur_min = float(dur_vals.min().item())
+            launch_skew = float((launch_vals.max() - launch_vals.min()).item() / 1000.0)
+            finish_skew = float((finish_vals.max() - finish_vals.min()).item() / 1000.0)
+            dur_avg = float(dur_vals.mean().item() / 1000.0)
+            dur_max = float(dur_vals.max().item() / 1000.0)
+            dur_min = float(dur_vals.min().item() / 1000.0)
             latest_idx = int(torch.argmax(launch_vals).item())
             latest_rank = int(rank_vals[latest_idx].item())
 
@@ -229,14 +229,14 @@ class AttentionProfiler:
         if launch_time is None or end_time is None:
             return
         try:
-            launch_ms = float(launch_time) * 1000.0
-            finish_ms = float(end_time) * 1000.0
-            duration_ms = max(finish_ms - launch_ms, 0.0)
+            launch_us = int(round(float(launch_time) * 1_000_000.0))
+            finish_us = int(round(float(end_time) * 1_000_000.0))
+            duration_us = max(finish_us - launch_us, 0)
             world_size = dist.get_world_size(group=group)
             rank_global = dist.get_rank()
             local_tensor = torch.tensor(
-                [launch_ms, finish_ms, duration_ms, float(rank_global)],
-                dtype=torch.float64,
+                [launch_us, finish_us, duration_us, int(rank_global)],
+                dtype=torch.int64,
                 device=self.device,
             )
             gather_list = [torch.zeros_like(local_tensor) for _ in range(world_size)]
@@ -246,17 +246,17 @@ class AttentionProfiler:
             if group_rank != 0:
                 return
 
-            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu()
-            launch_vals = gather_tensor[:, 0]
-            finish_vals = gather_tensor[:, 1]
-            dur_vals = gather_tensor[:, 2]
-            rank_vals = gather_tensor[:, 3].to(torch.int64)
+            gather_tensor = torch.stack(gather_list, dim=0).detach().cpu().to(torch.int64)
+            launch_vals = gather_tensor[:, 0].to(torch.float64)
+            finish_vals = gather_tensor[:, 1].to(torch.float64)
+            dur_vals = gather_tensor[:, 2].to(torch.float64)
+            rank_vals = gather_tensor[:, 3]
 
-            launch_skew = float(launch_vals.max().item() - launch_vals.min().item())
-            finish_skew = float(finish_vals.max().item() - finish_vals.min().item())
-            dur_avg = float(dur_vals.mean().item())
-            dur_max = float(dur_vals.max().item())
-            dur_min = float(dur_vals.min().item())
+            launch_skew = float((launch_vals.max() - launch_vals.min()).item() / 1000.0)
+            finish_skew = float((finish_vals.max() - finish_vals.min()).item() / 1000.0)
+            dur_avg = float(dur_vals.mean().item() / 1000.0)
+            dur_max = float(dur_vals.max().item() / 1000.0)
+            dur_min = float(dur_vals.min().item() / 1000.0)
             slowest_idx = int(torch.argmax(dur_vals).item())
             slowest_rank = int(rank_vals[slowest_idx].item())
 
