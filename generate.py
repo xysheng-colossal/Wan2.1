@@ -93,6 +93,19 @@ def _validate_args(args):
     assert args.size in SUPPORTED_SIZES[args.task], \
         f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
+    if args.profile_mode_steps <= 0:
+        raise ValueError(f"profile_mode_steps must be >= 1, but get {args.profile_mode_steps}")
+    if args.profile_mode_wait < 0:
+        raise ValueError(f"profile_mode_wait must be >= 0, but get {args.profile_mode_wait}")
+    if args.profile_mode_warmup < 0:
+        raise ValueError(f"profile_mode_warmup must be >= 0, but get {args.profile_mode_warmup}")
+    if args.profile_mode_active <= 0:
+        raise ValueError(f"profile_mode_active must be >= 1, but get {args.profile_mode_active}")
+    if args.profile_mode_repeat <= 0:
+        raise ValueError(f"profile_mode_repeat must be >= 1, but get {args.profile_mode_repeat}")
+    if args.profile_mode_skip_first < 0:
+        raise ValueError(f"profile_mode_skip_first must be >= 0, but get {args.profile_mode_skip_first}")
+
 
 def _parse_args():
     parser = argparse.ArgumentParser(
@@ -163,6 +176,59 @@ def _parse_args():
         type=str,
         default=None,
         help="Append concise block profile report to this file (BLOCK_RUN/BLOCK format).",
+    )
+    parser.add_argument(
+        "--profile_mode",
+        type=str,
+        default="normal",
+        choices=["normal", "detailed"],
+        help=(
+            "Profile mode: "
+            "`normal` keeps current behavior; "
+            "`detailed` enables torch_npu.profiler trace and per-step timing logs."
+        ),
+    )
+    parser.add_argument(
+        "--profile_mode_dir",
+        type=str,
+        default="./result",
+        help="Trace output directory used when --profile_mode=detailed.",
+    )
+    parser.add_argument(
+        "--profile_mode_steps",
+        type=int,
+        default=2,
+        help="Number of generate iterations executed in detailed profile mode.",
+    )
+    parser.add_argument(
+        "--profile_mode_wait",
+        type=int,
+        default=0,
+        help="torch_npu.profiler schedule wait steps for detailed profile mode.",
+    )
+    parser.add_argument(
+        "--profile_mode_warmup",
+        type=int,
+        default=1,
+        help="torch_npu.profiler schedule warmup steps for detailed profile mode.",
+    )
+    parser.add_argument(
+        "--profile_mode_active",
+        type=int,
+        default=1,
+        help="torch_npu.profiler schedule active steps for detailed profile mode.",
+    )
+    parser.add_argument(
+        "--profile_mode_repeat",
+        type=int,
+        default=1,
+        help="torch_npu.profiler schedule repeat count for detailed profile mode.",
+    )
+    parser.add_argument(
+        "--profile_mode_skip_first",
+        type=int,
+        default=0,
+        help="torch_npu.profiler schedule skip_first for detailed profile mode.",
     )
     parser.add_argument(
         "--analyze_profile",
@@ -413,6 +479,96 @@ def _run_profile_analysis(profile_file):
         logging.info("Profile analysis report:\n" + output)
 
 
+def _build_npu_profiler_experimental_config():
+    return torch_npu.profiler._ExperimentalConfig(
+        export_type=[
+            torch_npu.profiler.ExportType.Text,
+            torch_npu.profiler.ExportType.Db
+        ],
+        profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+        msprof_tx=False,
+        mstx_domain_include=[],
+        mstx_domain_exclude=[],
+        aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+        l2_cache=False,
+        op_attr=False,
+        data_simplification=False,
+        record_op_args=False,
+        gc_detect_threshold=None,
+        host_sys=[
+            torch_npu.profiler.HostSystem.CPU,
+            torch_npu.profiler.HostSystem.MEM
+        ],
+        sys_io=False,
+        sys_interconnection=False
+    )
+
+
+def _run_generate_with_profile_mode(args, rank, stream, generate_once):
+    stream.synchronize()
+    begin = time.time()
+
+    if args.profile_mode != "detailed":
+        video = generate_once()
+        stream.synchronize()
+        return video, time.time() - begin
+
+    if args.profile_mode_steps <= 0:
+        raise ValueError("--profile_mode_steps must be >= 1 when --profile_mode=detailed")
+
+    os.makedirs(args.profile_mode_dir, exist_ok=True)
+    if rank == 0:
+        logging.info(
+            "Detailed profile mode enabled: steps=%d, schedule(wait=%d,warmup=%d,active=%d,repeat=%d,skip_first=%d), dir=%s",
+            args.profile_mode_steps,
+            args.profile_mode_wait,
+            args.profile_mode_warmup,
+            args.profile_mode_active,
+            args.profile_mode_repeat,
+            args.profile_mode_skip_first,
+            args.profile_mode_dir,
+        )
+
+    video = None
+    experimental_config = _build_npu_profiler_experimental_config()
+    with torch_npu.profiler.profile(
+        activities=[
+            torch_npu.profiler.ProfilerActivity.CPU,
+            torch_npu.profiler.ProfilerActivity.NPU
+        ],
+        schedule=torch_npu.profiler.schedule(
+            wait=args.profile_mode_wait,
+            warmup=args.profile_mode_warmup,
+            active=args.profile_mode_active,
+            repeat=args.profile_mode_repeat,
+            skip_first=args.profile_mode_skip_first,
+        ),
+        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(args.profile_mode_dir),
+        record_shapes=True,
+        profile_memory=False,
+        with_stack=True,
+        with_modules=True,
+        with_flops=True,
+        experimental_config=experimental_config,
+    ) as prof:
+        for step_idx in range(args.profile_mode_steps):
+            step_begin = time.time()
+            video = generate_once()
+            prof.step()
+            if rank == 0:
+                logging.info(
+                    "[ProfileMode:detailed] step %d/%d used %.4fs",
+                    step_idx + 1,
+                    args.profile_mode_steps,
+                    time.time() - step_begin,
+                )
+
+    stream.synchronize()
+    if rank == 0:
+        logging.info("[ProfileMode:detailed] trace exported to %s", args.profile_mode_dir)
+    return video, time.time() - begin
+
+
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -613,31 +769,35 @@ def generate(args):
             _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info(f"Generating video ...")
-        stream.synchronize()
-        begin = time.time()
-        video = wan_t2v.generate(
-            t2v_generate_kwargs["input_prompt"],
-            size=t2v_generate_kwargs["size"],
-            frame_num=t2v_generate_kwargs["frame_num"],
-            shift=t2v_generate_kwargs["shift"],
-            sample_solver=t2v_generate_kwargs["sample_solver"],
-            sampling_steps=args.sample_steps,
-            guide_scale=t2v_generate_kwargs["guide_scale"],
-            seed=t2v_generate_kwargs["seed"],
-            offload_model=t2v_generate_kwargs["offload_model"],
-            profile_stage=args.profile_stage,
-            profile_stage_file=args.profile_stage_file,
-            profile_attn=args.profile_attn,
-            profile_attn_file=attn_profile_file,
-            profile_block=args.profile_block,
-            profile_block_file=block_profile_file,
-            legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
-            cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
-            cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
+        def _run_t2v_once():
+            return wan_t2v.generate(
+                t2v_generate_kwargs["input_prompt"],
+                size=t2v_generate_kwargs["size"],
+                frame_num=t2v_generate_kwargs["frame_num"],
+                shift=t2v_generate_kwargs["shift"],
+                sample_solver=t2v_generate_kwargs["sample_solver"],
+                sampling_steps=args.sample_steps,
+                guide_scale=t2v_generate_kwargs["guide_scale"],
+                seed=t2v_generate_kwargs["seed"],
+                offload_model=t2v_generate_kwargs["offload_model"],
+                profile_stage=args.profile_stage,
+                profile_stage_file=args.profile_stage_file,
+                profile_attn=args.profile_attn,
+                profile_attn_file=attn_profile_file,
+                profile_block=args.profile_block,
+                profile_block_file=block_profile_file,
+                legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+                cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
+                cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
+            )
+
+        video, elapsed_sec = _run_generate_with_profile_mode(
+            args=args,
+            rank=rank,
+            stream=stream,
+            generate_once=_run_t2v_once,
         )
-        stream.synchronize()
-        end = time.time()
-        logging.info(f"Generating video used time {end - begin: .4f}s")
+        logging.info(f"Generating video used time {elapsed_sec: .4f}s")
 
     else:
         if args.prompt is None:
@@ -755,30 +915,33 @@ def generate(args):
             _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info("Generating video ...")
-        stream.synchronize()
-        begin = time.time()
-        video = wan_i2v.generate(
-            i2v_generate_kwargs["input_prompt"],
-            i2v_generate_kwargs["image"],
-            max_area=i2v_generate_kwargs["max_area"],
-            frame_num=i2v_generate_kwargs["frame_num"],
-            shift=i2v_generate_kwargs["shift"],
-            sample_solver=i2v_generate_kwargs["sample_solver"],
-            sampling_steps=args.sample_steps,
-            guide_scale=i2v_generate_kwargs["guide_scale"],
-            seed=i2v_generate_kwargs["seed"],
-            offload_model=i2v_generate_kwargs["offload_model"],
-            profile_stage=args.profile_stage,
-            profile_stage_file=args.profile_stage_file,
-            profile_attn=args.profile_attn,
-            profile_attn_file=attn_profile_file,
-            profile_block=args.profile_block,
-            profile_block_file=block_profile_file,
-        )
+        def _run_i2v_once():
+            return wan_i2v.generate(
+                i2v_generate_kwargs["input_prompt"],
+                i2v_generate_kwargs["image"],
+                max_area=i2v_generate_kwargs["max_area"],
+                frame_num=i2v_generate_kwargs["frame_num"],
+                shift=i2v_generate_kwargs["shift"],
+                sample_solver=i2v_generate_kwargs["sample_solver"],
+                sampling_steps=args.sample_steps,
+                guide_scale=i2v_generate_kwargs["guide_scale"],
+                seed=i2v_generate_kwargs["seed"],
+                offload_model=i2v_generate_kwargs["offload_model"],
+                profile_stage=args.profile_stage,
+                profile_stage_file=args.profile_stage_file,
+                profile_attn=args.profile_attn,
+                profile_attn_file=attn_profile_file,
+                profile_block=args.profile_block,
+                profile_block_file=block_profile_file,
+            )
 
-        stream.synchronize()
-        end = time.time()
-        logging.info(f"Generating video used time {end - begin: .4f}s")
+        video, elapsed_sec = _run_generate_with_profile_mode(
+            args=args,
+            rank=rank,
+            stream=stream,
+            generate_once=_run_i2v_once,
+        )
+        logging.info(f"Generating video used time {elapsed_sec: .4f}s")
 
 
     if rank == 0:
