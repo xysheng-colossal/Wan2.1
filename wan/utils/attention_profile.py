@@ -37,6 +37,7 @@ class AttentionProfiler:
         self.collective_duration_max_ms = defaultdict(list)
         self.collective_duration_min_ms = defaultdict(list)
         self.collective_late_rank_counts = defaultdict(lambda: defaultdict(int))
+        self.collective_diag_call_counts = defaultdict(int)
         self.op_diag_enabled = self._resolve_op_diag_enabled()
         self.op_diag_every_step = self._resolve_positive_int_env(
             "WAN_SLOW_CARD_OP_DIAG_EVERY_STEP", default_value=1
@@ -51,6 +52,7 @@ class AttentionProfiler:
         self.op_duration_max_ms = defaultdict(list)
         self.op_duration_min_ms = defaultdict(list)
         self.op_slowest_rank_counts = defaultdict(lambda: defaultdict(int))
+        self.op_diag_call_counts = defaultdict(int)
 
     @staticmethod
     def _resolve_collective_diag_enabled():
@@ -139,10 +141,6 @@ class AttentionProfiler:
             return False
         if self.collective_diag_stage_filter is not None and stage_name not in self.collective_diag_stage_filter:
             return False
-        if self.collective_diag_max_calls > 0:
-            sampled = len(self.collective_launch_skew_ms.get(stage_name, []))
-            if sampled >= self.collective_diag_max_calls:
-                return False
         try:
             step_id = int(step_idx)
         except Exception:
@@ -159,10 +157,6 @@ class AttentionProfiler:
             return False
         if self.op_diag_stage_filter is not None and stage_name not in self.op_diag_stage_filter:
             return False
-        if self.op_diag_max_calls > 0:
-            sampled = len(self.op_launch_skew_ms.get(stage_name, []))
-            if sampled >= self.op_diag_max_calls:
-                return False
         try:
             step_id = int(step_idx)
         except Exception:
@@ -175,6 +169,10 @@ class AttentionProfiler:
     def record_collective_skew(self, stage_name, launch_time, end_time, group=None, step_idx=None):
         if not self._should_collective_diag(stage_name, step_idx):
             return
+        call_idx = self.collective_diag_call_counts[stage_name]
+        if self.collective_diag_max_calls > 0 and call_idx >= self.collective_diag_max_calls:
+            return
+        self.collective_diag_call_counts[stage_name] = call_idx + 1
         if launch_time is None or end_time is None:
             return
         try:
@@ -224,6 +222,10 @@ class AttentionProfiler:
     def record_op_skew(self, stage_name, launch_time, end_time, group=None, step_idx=None):
         if not self._should_op_diag(stage_name, step_idx):
             return
+        call_idx = self.op_diag_call_counts[stage_name]
+        if self.op_diag_max_calls > 0 and call_idx >= self.op_diag_max_calls:
+            return
+        self.op_diag_call_counts[stage_name] = call_idx + 1
         if launch_time is None or end_time is None:
             return
         try:
