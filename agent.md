@@ -114,12 +114,17 @@
 - `block group` 后 cache 挂载要递归到真实 attention block（否则 `self.cache` 为 `None`）。
 - 远端偶发 `Connection closed by UNKNOWN port 65535`，改用交互式 SSH 继续执行。
 
-## 7. 标准运行模板（20-step）
+## 7. 固定 Prompt（统一）
+- 固定 prompt（后续对比统一使用）：
+  `A young boy with short brown hair, dressed in a dark blue t-shirt and red pants, is seen playing a KAWAI upright piano with skill and concentration. The piano's glossy black surface reflects the room's lighting, and its white and black keys are arranged in a standard layout, indicating a scene of musical practice or learning. The boy's hands move over the keys, suggesting he is engaged in playing or practicing a piece.`
+
+## 8. 标准运行模板（20-step，详细 profile）
 ```bash
-docker exec -i mindie-wan2.1-xysheng bash -lc '
+docker exec -i mindie-wan2.1-xysheng bash -lc "
 set -euo pipefail
 cd /root/xysheng/Wan2.1
 model_base=/apps/sharedstorage/Wan2.1-T2V-14B
+prompt_fixed=\"A young boy with short brown hair, dressed in a dark blue t-shirt and red pants, is seen playing a KAWAI upright piano with skill and concentration. The piano's glossy black surface reflects the room's lighting, and its white and black keys are arranged in a standard layout, indicating a scene of musical practice or learning. The boy's hands move over the keys, suggesting he is engaged in playing or practicing a piece.\"
 WAN_A2A_FENCE=0 \
 WAN_A2A_EVENT_GATE=0 \
 WAN_FSDP_ALLGATHER_WAIT_A2A=0 \
@@ -129,7 +134,7 @@ WAN_FSDP_WRAP_MODE=block \
 torchrun --nproc_per_node=4 generate.py \
   --task t2v-14B \
   --size 832*480 \
-  --ckpt_dir ${model_base} \
+  --ckpt_dir \${model_base} \
   --dit_fsdp \
   --t5_fsdp \
   --frame_num 81 \
@@ -138,16 +143,91 @@ torchrun --nproc_per_node=4 generate.py \
   --vae_parallel \
   --profile_stage \
   --profile_attn \
-  --profile_stage_file perf_xxx.csv \
+  --profile_mode detailed \
+  --profile_mode_dir result_profile_fsdp_baseline_20_fixedprompt \
+  --profile_mode_steps 1 \
+  --profile_mode_wait 0 \
+  --profile_mode_warmup 0 \
+  --profile_mode_active 1 \
+  --profile_mode_repeat 1 \
+  --profile_mode_skip_first 0 \
+  --profile_stage_file perf_fsdp_baseline_20_fixedprompt_detailed.csv \
   --serialize_comm \
-  --prompt "A boy plays piano." > run_xxx.log 2>&1
-grep -E "request_total:|denoise_step_total: avg=|attn_kernel: avg=|comm_total: avg=|qkv_all_to_all: avg=|out_all_to_all: avg=|Generating video used time" run_xxx.log | tail -n 40
-'
+  --prompt \"\${prompt_fixed}\" > run_fsdp_baseline_20_fixedprompt_detailed.log 2>&1
+grep -E "request_total:|denoise_step_total: avg=|attn_kernel: avg=|comm_total: avg=|qkv_all_to_all: avg=|out_all_to_all: avg=|Generating video used time|ProfileMode:detailed" run_fsdp_baseline_20_fixedprompt_detailed.log | tail -n 80
+"
 ```
 
-## 8. 新窗口接手 Checklist
+## 9. 新窗口接手 Checklist
 1. `git status` 确认工作区干净。  
 2. `git log --oneline -n 8` 确认最近提交包含：A2A gate / ALLGATHER_WAIT_A2A / WRAP_MODE。  
 3. 服务器 `git pull xys perf`。  
 4. 先跑 1 组对照，再改 1 个变量，禁止一次改多个主变量。  
 5. 每次记录：配置、`request_total`、`comm_total`、`qkv/out_all_to_all`、`reserved_peak`。  
+
+## 10. profile 文件传输（先压缩再同步）
+
+### 9.1 服务器端：压缩并上传
+```bash
+# 在服务器执行（如：ssh npu 后）
+cd /root/xysheng/Wan2.1
+
+profile_name=result_210              # 传目录名或文件名前缀
+profile_tar="${profile_name}.tar.gz"
+
+tar -czf "${profile_tar}" "${profile_name}"
+
+export jfs_url="tmp.hpc-ai.com"
+export jfs_ak="admin"
+export jfs_sk="Luchen@123"
+juicefs sync "${profile_tar}" "minio://${jfs_ak}:${jfs_sk}@${jfs_url}/tmp/${profile_tar}"
+```
+
+### 9.2 本地端：下载并解压
+```bash
+# 在本地电脑执行
+profile_name=result_210
+profile_tar="${profile_name}.tar.gz"
+
+export jfs_url="tmp.luchentech.com"
+export jfs_ak="admin"
+export jfs_sk="Luchen@123"
+juicefs sync "minio://${jfs_ak}:${jfs_sk}@${jfs_url}/tmp/${profile_tar}" "./${profile_tar}"
+
+tar -xzf "./${profile_tar}"
+```
+
+### 9.3 可复用函数（后续只传文件名）
+```bash
+# 服务器函数：压缩并上传
+upload_profile() {
+  local profile_name="$1"
+  local profile_tar="${profile_name}.tar.gz"
+  cd /root/xysheng/Wan2.1
+  tar -czf "${profile_tar}" "${profile_name}"
+  export jfs_url="tmp.hpc-ai.com"
+  export jfs_ak="admin"
+  export jfs_sk="Luchen@123"
+  juicefs sync "${profile_tar}" "minio://${jfs_ak}:${jfs_sk}@${jfs_url}/tmp/${profile_tar}"
+}
+
+# 本地函数：下载并解压
+download_profile() {
+  local profile_name="$1"
+  local profile_tar="${profile_name}.tar.gz"
+  export jfs_url="tmp.luchentech.com"
+  export jfs_ak="admin"
+  export jfs_sk="Luchen@123"
+  juicefs sync "minio://${jfs_ak}:${jfs_sk}@${jfs_url}/tmp/${profile_tar}" "./${profile_tar}"
+  tar -xzf "./${profile_tar}"
+}
+```
+
+### 9.4 用法
+```bash
+# 服务器
+upload_profile result_210
+
+# 本地
+download_profile result_210
+```
