@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 import os
 import sys
+import subprocess
 import warnings
 import random
 import time
@@ -126,6 +127,73 @@ def _parse_args():
         type=str2bool,
         default=None,
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage."
+    )
+    parser.add_argument(
+        "--profile_stage",
+        action="store_true",
+        default=False,
+        help="Print detailed server-side stage timing instead of using offline profile traces.",
+    )
+    parser.add_argument(
+        "--profile_stage_file",
+        type=str,
+        default=None,
+        help="Append concise stage profile report to this file (RUN/TOTAL/STEP/SLOW format).",
+    )
+    parser.add_argument(
+        "--profile_attn",
+        action="store_true",
+        default=False,
+        help="Enable internal attention breakdown profiling.",
+    )
+    parser.add_argument(
+        "--profile_attn_file",
+        type=str,
+        default=None,
+        help="Append concise attention profile report to this file (ATTN_RUN/ATTN format).",
+    )
+    parser.add_argument(
+        "--profile_block",
+        action="store_true",
+        default=False,
+        help="Enable DiT block-level breakdown profiling.",
+    )
+    parser.add_argument(
+        "--profile_block_file",
+        type=str,
+        default=None,
+        help="Append concise block profile report to this file (BLOCK_RUN/BLOCK format).",
+    )
+    parser.add_argument(
+        "--analyze_profile",
+        action="store_true",
+        default=False,
+        help="After generation, analyze profile_stage_file and print bottlenecks/suggestions.",
+    )
+    parser.add_argument(
+        "--perf_logic",
+        type=str,
+        default="optimized",
+        choices=["legacy", "optimized"],
+        help="Select inference logic for A/B perf comparison.",
+    )
+    parser.add_argument(
+        "--serialize_comm",
+        action="store_true",
+        default=False,
+        help="Enable lightweight serialization on FSDP all-gather scheduling only.",
+    )
+    parser.add_argument(
+        "--cfg_fused_forward",
+        action="store_true",
+        default=False,
+        help="For cfg_size=1, fuse cond/uncond into one DiT forward (batch=2) for perf A/B.",
+    )
+    parser.add_argument(
+        "--cache_cross_kv",
+        action="store_true",
+        default=False,
+        help="Cache cross-attention K/V projections across denoise steps.",
     )
     parser.add_argument(
         "--cfg_size",
@@ -275,6 +343,76 @@ def _init_logging(rank):
         logging.basicConfig(level=logging.ERROR)
 
 
+def _set_transformer_rainfusion_config(transformer, dit_fsdp, rainfusion_config):
+    if dit_fsdp:
+        transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
+    else:
+        transformer.rainfusion_config = rainfusion_config
+
+
+def _attach_cache_to_transformer(transformer, dit_fsdp, cache, args):
+    for block in _iter_transformer_cache_blocks(transformer, dit_fsdp):
+        block.cache = cache
+        block.args = args
+
+
+def _get_cache_blocks_count(args, transformer):
+    return len(_iter_transformer_cache_blocks(transformer, args.dit_fsdp)) * 2 // args.cfg_size
+
+
+def _iter_transformer_cache_blocks(transformer, dit_fsdp):
+    def _unwrap_fsdp(module):
+        return getattr(module, "_fsdp_wrapped_module", module)
+
+    root = _unwrap_fsdp(transformer) if dit_fsdp else transformer
+    if not hasattr(root, "blocks"):
+        return []
+
+    targets = []
+    for block in root.blocks:
+        stack = [_unwrap_fsdp(block)]
+        while stack:
+            module = stack.pop()
+            if hasattr(module, "cache") and hasattr(module, "args"):
+                targets.append(module)
+            if hasattr(module, "blocks"):
+                for child in reversed(list(module.blocks)):
+                    stack.append(_unwrap_fsdp(child))
+    return targets
+
+
+def _run_profile_analysis(profile_file):
+    if not profile_file:
+        logging.warning("Skip profile analysis because profile_stage_file is empty.")
+        return
+
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "analyze_perf.py")
+    if not os.path.exists(script_path):
+        logging.warning(f"Skip profile analysis because script not found: {script_path}")
+        return
+
+    if not os.path.exists(profile_file):
+        logging.warning(f"Skip profile analysis because profile file not found: {profile_file}")
+        return
+
+    cmd = [sys.executable, script_path, profile_file]
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except Exception as exc:
+        logging.warning(f"Profile analysis failed: {exc}")
+        return
+
+    if result.returncode != 0:
+        logging.warning(
+            f"Profile analysis exited with code {result.returncode}: {result.stderr.strip()}"
+        )
+        return
+
+    output = result.stdout.strip()
+    if output:
+        logging.info("Profile analysis report:\n" + output)
+
+
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -341,6 +479,7 @@ def generate(args):
 
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
+    use_legacy_perf = args.perf_logic == "legacy"
 
     if dist.is_initialized():
         base_seed = [args.base_seed] if rank == 0 else [None]
@@ -353,6 +492,12 @@ def generate(args):
         "grid_size": None,
         "atten_mask_all": None
     }
+    if args.use_rainfusion and args.cfg_fused_forward:
+        logging.warning(
+            "`--use_rainfusion` is currently incompatible with `--cfg_fused_forward`; "
+            "falling back to non-fused CFG forward."
+        )
+        args.cfg_fused_forward = False
 
     if "t2v" in args.task or "t2i" in args.task:
         if args.prompt is None:
@@ -392,15 +537,16 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_t2v.model
 
         if args.use_rainfusion:
-            if args.dit_fsdp:
-                transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
-            else:
-                transformer.rainfusion_config = rainfusion_config
+            _set_transformer_rainfusion_config(
+                transformer, args.dit_fsdp, rainfusion_config
+            )
 
         if args.tp_size > 1:
             logging.info("Initializing tensor parallel...")
@@ -410,63 +556,85 @@ def generate(args):
 
         config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
-        if args.dit_fsdp:
-            for block in transformer._fsdp_wrapped_module.blocks:
-                block._fsdp_wrapped_module.cache = cache
-                block._fsdp_wrapped_module.args = args
-        else:
-            for block in transformer.blocks:
-                block.cache = cache
-                block.args = args
+        _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
-        logging.info(f"Warm up 2 steps...")
-        video = wan_t2v.generate(
-            args.prompt,
+        t2v_generate_kwargs = dict(
+            input_prompt=args.prompt,
             size=SIZE_CONFIGS[args.size],
             frame_num=args.frame_num,
             shift=args.sample_shift,
             sample_solver=args.sample_solver,
-            sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+            legacy_model_to_each_step=use_legacy_perf,
+            cfg_fused_forward=args.cfg_fused_forward,
+            cache_cross_kv=args.cache_cross_kv,
+        )
+        attn_profile_file = args.profile_attn_file or args.profile_stage_file
+        block_profile_file = args.profile_block_file or args.profile_stage_file
+
+        logging.info(f"Warm up 2 steps...")
+        video = wan_t2v.generate(
+            t2v_generate_kwargs["input_prompt"],
+            size=t2v_generate_kwargs["size"],
+            frame_num=t2v_generate_kwargs["frame_num"],
+            shift=t2v_generate_kwargs["shift"],
+            sample_solver=t2v_generate_kwargs["sample_solver"],
+            sampling_steps=2,
+            guide_scale=t2v_generate_kwargs["guide_scale"],
+            seed=t2v_generate_kwargs["seed"],
+            offload_model=t2v_generate_kwargs["offload_model"],
+            profile_stage=False,
+            profile_stage_file=None,
+            profile_attn=False,
+            profile_attn_file=None,
+            profile_block=False,
+            profile_block_file=None,
+            legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+            cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
+            cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
+        )
 
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps,
                 step_start=args.start_step,
                 step_interval=args.attentioncache_interval,
                 step_end=args.end_step
             )
             cache = CacheAgent(config)
-            if args.dit_fsdp:
-                for block in transformer._fsdp_wrapped_module.blocks:
-                    block._fsdp_wrapped_module.cache = cache
-                    block._fsdp_wrapped_module.args = args
-            else:
-                for block in transformer.blocks:
-                    block.cache = cache
-                    block.args = args
+            _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info(f"Generating video ...")
         stream.synchronize()
         begin = time.time()
         video = wan_t2v.generate(
-            args.prompt,
-            size=SIZE_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
+            t2v_generate_kwargs["input_prompt"],
+            size=t2v_generate_kwargs["size"],
+            frame_num=t2v_generate_kwargs["frame_num"],
+            shift=t2v_generate_kwargs["shift"],
+            sample_solver=t2v_generate_kwargs["sample_solver"],
             sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+            guide_scale=t2v_generate_kwargs["guide_scale"],
+            seed=t2v_generate_kwargs["seed"],
+            offload_model=t2v_generate_kwargs["offload_model"],
+            profile_stage=args.profile_stage,
+            profile_stage_file=args.profile_stage_file,
+            profile_attn=args.profile_attn,
+            profile_attn_file=attn_profile_file,
+            profile_block=args.profile_block,
+            profile_block_file=block_profile_file,
+            legacy_model_to_each_step=t2v_generate_kwargs["legacy_model_to_each_step"],
+            cfg_fused_forward=t2v_generate_kwargs["cfg_fused_forward"],
+            cache_cross_kv=t2v_generate_kwargs["cache_cross_kv"],
+        )
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
@@ -515,15 +683,16 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             use_vae_parallel=args.vae_parallel,
             quant_dit_path=args.quant_dit_path,
+            use_legacy_perf=use_legacy_perf,
+            serialize_comm=args.serialize_comm,
         )
 
         transformer = wan_i2v.model
 
         if args.use_rainfusion:
-            if args.dit_fsdp:
-                transformer._fsdp_wrapped_module.rainfusion_config = rainfusion_config
-            else:
-                transformer.rainfusion_config = rainfusion_config
+            _set_transformer_rainfusion_config(
+                transformer, args.dit_fsdp, rainfusion_config
+            )
 
         if args.tp_size > 1:
             logging.info("Initializing tensor parallel...")
@@ -533,71 +702,89 @@ def generate(args):
 
         config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps
             )
         cache = CacheAgent(config)
-        if args.dit_fsdp:
-            for block in transformer._fsdp_wrapped_module.blocks:
-                block._fsdp_wrapped_module.cache = cache
-                block._fsdp_wrapped_module.args = args
-        else:
-            for block in transformer.blocks:
-                block.cache = cache
-                block.args = args
+        _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
-        logging.info(f"Warm up 2 steps...")
-        video = wan_i2v.generate(
-            args.prompt,
-            img,
+        i2v_generate_kwargs = dict(
+            input_prompt=args.prompt,
+            image=img,
             max_area=MAX_AREA_CONFIGS[args.size],
             frame_num=args.frame_num,
             shift=args.sample_shift,
             sample_solver=args.sample_solver,
-            sampling_steps=2,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model,
+        )
+        attn_profile_file = args.profile_attn_file or args.profile_stage_file
+        block_profile_file = args.profile_block_file or args.profile_stage_file
+
+        logging.info(f"Warm up 2 steps...")
+        video = wan_i2v.generate(
+            i2v_generate_kwargs["input_prompt"],
+            i2v_generate_kwargs["image"],
+            max_area=i2v_generate_kwargs["max_area"],
+            frame_num=i2v_generate_kwargs["frame_num"],
+            shift=i2v_generate_kwargs["shift"],
+            sample_solver=i2v_generate_kwargs["sample_solver"],
+            sampling_steps=2,
+            guide_scale=i2v_generate_kwargs["guide_scale"],
+            seed=i2v_generate_kwargs["seed"],
+            offload_model=i2v_generate_kwargs["offload_model"],
+            profile_stage=False,
+            profile_stage_file=None,
+            profile_attn=False,
+            profile_attn_file=None,
+            profile_block=False,
+            profile_block_file=None,
+        )
 
         if args.use_attentioncache:
             config = CacheConfig(
                 method="attention_cache",
-                blocks_count=len(transformer.blocks) * 2 // args.cfg_size,
+                blocks_count=_get_cache_blocks_count(args, transformer),
                 steps_count=args.sample_steps,
                 step_start=args.start_step,
                 step_interval=args.attentioncache_interval,
                 step_end=args.end_step
             )
             cache = CacheAgent(config)
-            if args.dit_fsdp:
-                for block in transformer._fsdp_wrapped_module.blocks:
-                    block._fsdp_wrapped_module.cache = cache
-                    block._fsdp_wrapped_module.args = args
-            else:
-                for block in transformer.blocks:
-                    block.cache = cache
-                    block.args = args
+            _attach_cache_to_transformer(transformer, args.dit_fsdp, cache, args)
 
         logging.info("Generating video ...")
         stream.synchronize()
         begin = time.time()
         video = wan_i2v.generate(
-            args.prompt,
-            img,
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
+            i2v_generate_kwargs["input_prompt"],
+            i2v_generate_kwargs["image"],
+            max_area=i2v_generate_kwargs["max_area"],
+            frame_num=i2v_generate_kwargs["frame_num"],
+            shift=i2v_generate_kwargs["shift"],
+            sample_solver=i2v_generate_kwargs["sample_solver"],
             sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+            guide_scale=i2v_generate_kwargs["guide_scale"],
+            seed=i2v_generate_kwargs["seed"],
+            offload_model=i2v_generate_kwargs["offload_model"],
+            profile_stage=args.profile_stage,
+            profile_stage_file=args.profile_stage_file,
+            profile_attn=args.profile_attn,
+            profile_attn_file=attn_profile_file,
+            profile_block=args.profile_block,
+            profile_block_file=block_profile_file,
+        )
+
         stream.synchronize()
         end = time.time()
         logging.info(f"Generating video used time {end - begin: .4f}s")
 
 
     if rank == 0:
+        if args.analyze_profile and args.profile_stage:
+            _run_profile_analysis(args.profile_stage_file)
+
         if args.save_file is None:
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
             formatted_prompt = args.prompt.replace(" ", "_").replace("/",

@@ -21,6 +21,16 @@ from .modules.vae import WanVAE
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .utils.stage_profile import StageProfiler
+from .utils.attention_profile import (
+    configure_attention_profiler,
+    report_attention_profiler,
+)
+from .utils.block_profile import (
+    configure_block_profiler,
+    get_block_profiler,
+    report_block_profiler,
+)
 from .vae_patch_parallel import VAE_patch_parallel, set_vae_patch_parallel
 
 from wan.distributed.parallel_mgr import (
@@ -45,6 +55,8 @@ class WanT2V:
         t5_cpu=False,
         use_vae_parallel=False,
         quant_dit_path=None,
+        use_legacy_perf=False,
+        serialize_comm=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -76,7 +88,12 @@ class WanT2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
 
-        shard_fn = partial(shard_model, device_id=device_id)
+        shard_fn = partial(
+            shard_model,
+            device_id=device_id,
+            use_legacy_behavior=use_legacy_perf,
+            serialize_communication=serialize_comm,
+        )
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -148,7 +165,16 @@ class WanT2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 profile_stage=False,
+                 profile_stage_file=None,
+                 profile_attn=False,
+                 profile_attn_file=None,
+                 profile_block=False,
+                 profile_block_file=None,
+                 legacy_model_to_each_step=False,
+                 cfg_fused_forward=False,
+                 cache_cross_kv=False):
         r"""
         Generates video frames from text prompt using diffusion process.
 
@@ -173,6 +199,24 @@ class WanT2V:
                 Random seed for noise generation. If -1, use random seed.
             offload_model (`bool`, *optional*, defaults to True):
                 If True, offloads models to CPU during generation to save VRAM
+            profile_stage (`bool`, *optional*, defaults to False):
+                If True, prints detailed stage timing logs on server side
+            profile_stage_file (`str`, *optional*, defaults to None):
+                If set, append concise stage profiling report lines into this file
+            profile_attn (`bool`, *optional*, defaults to False):
+                If True, enable internal attention stage profiling
+            profile_attn_file (`str`, *optional*, defaults to None):
+                If set, append concise attention profiling lines into this file
+            profile_block (`bool`, *optional*, defaults to False):
+                If True, enable DiT block-level profiling
+            profile_block_file (`str`, *optional*, defaults to None):
+                If set, append concise block profiling lines into this file
+            legacy_model_to_each_step (`bool`, *optional*, defaults to False):
+                If True, keeps legacy behavior of calling `model.to(device)` at each denoise step
+            cfg_fused_forward (`bool`, *optional*, defaults to False):
+                If True and cfg_size=1, fuse cond/uncond into a single DiT forward with batch=2
+            cache_cross_kv (`bool`, *optional*, defaults to False):
+                If True, cache cross-attention K/V projections across denoise steps for static prompt context
 
         Returns:
             torch.Tensor:
@@ -182,6 +226,41 @@ class WanT2V:
                 - H: Frame height (from size)
                 - W: Frame width from size)
         """
+        profiler = StageProfiler(
+            enabled=profile_stage,
+            device=self.device,
+            rank=self.rank,
+            name="T2V",
+            output_file=profile_stage_file,
+            run_info={
+                "frame_num": frame_num,
+                "sampling_steps": sampling_steps,
+                "width": size[0],
+                "height": size[1],
+                "offload_model": int(bool(offload_model)),
+                "sample_solver": sample_solver,
+                "legacy_model_to_each_step": int(bool(legacy_model_to_each_step)),
+                "cfg_fused_forward": int(bool(cfg_fused_forward)),
+                "cache_cross_kv": int(bool(cache_cross_kv)),
+            },
+        )
+        configure_attention_profiler(
+            enabled=profile_attn,
+            device=self.device,
+            rank=self.rank,
+            name="T2V",
+            output_file=profile_attn_file,
+        )
+        configure_block_profiler(
+            enabled=profile_block,
+            device=self.device,
+            rank=self.rank,
+            name="T2V",
+            output_file=profile_block_file,
+        )
+        block_profiler = get_block_profiler()
+        total_start = profiler.start()
+
         # preprocess
         F = frame_num
         target_shape = (self.vae.model.z_dim, (F - 1) // self.vae_stride[0] + 1,
@@ -199,17 +278,37 @@ class WanT2V:
         seed_g.manual_seed(seed)
 
         if not self.t5_cpu:
+            t0 = profiler.start()
             self.text_encoder.model.to(self.device)
+            profiler.stop("t5_to_device", t0)
+
+            t0 = profiler.start()
             context = self.text_encoder([input_prompt], self.device)
+            profiler.stop("text_encode_pos", t0)
+
+            t0 = profiler.start()
             context_null = self.text_encoder([n_prompt], self.device)
+            profiler.stop("text_encode_neg", t0)
+
             if offload_model:
+                t0 = profiler.start()
                 self.text_encoder.model.cpu()
+                profiler.stop("t5_offload_cpu", t0)
         else:
+            t0 = profiler.start()
             context = self.text_encoder([input_prompt], torch.device('cpu'))
+            profiler.stop("text_encode_pos_cpu", t0)
+
+            t0 = profiler.start()
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
+            profiler.stop("text_encode_neg_cpu", t0)
+
+            t0 = profiler.start()
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
+            profiler.stop("text_context_to_device", t0)
 
+        t0 = profiler.start()
         noise = [
             torch.randn(
                 target_shape[0],
@@ -220,15 +319,16 @@ class WanT2V:
                 device=self.device,
                 generator=seed_g)
         ]
+        profiler.stop("noise_init", t0)
 
         @contextmanager
         def noop_no_sync():
             yield
 
         no_sync = getattr(self.model, 'no_sync', noop_no_sync)
-
         # evaluation mode
         with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
+            t0 = profiler.start()
 
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
@@ -250,69 +350,130 @@ class WanT2V:
                     sigmas=sampling_sigmas)
             else:
                 raise NotImplementedError("Unsupported solver.")
+            profiler.stop("scheduler_setup", t0)
 
             # sample videos
             latents = noise
 
-            arg_c = {'context': context, 'seq_len': seq_len}
-            arg_null = {'context': context_null, 'seq_len': seq_len}
+            arg_c = {'context': context, 'seq_len': seq_len, 'block_profiler': block_profiler, 'context_emb': None}
+            arg_null = {'context': context_null, 'seq_len': seq_len, 'block_profiler': block_profiler, 'context_emb': None}
             arg_all = {
-                'context': context if get_classifier_free_guidance_rank()==0 else context_null,
-                'seq_len': seq_len
+                'context': context if get_classifier_free_guidance_rank() == 0 else context_null,
+                'seq_len': seq_len,
+                'block_profiler': block_profiler,
+                'context_emb': None,
             }
 
-            for t_idx, t in enumerate(tqdm(timesteps)):
-                latent_model_input = latents
-                timestep = [t]
-
-                timestep = torch.stack(timestep)
-
+            if not legacy_model_to_each_step:
+                t0 = profiler.start()
                 self.model.to(self.device)
+                profiler.stop("dit_to_device", t0)
+
+            denoise_loop_start = profiler.start()
+            for t_idx, t in enumerate(tqdm(timesteps, disable=self.rank != 0)):
+                step_start = profiler.start()
+                latent_model_input = latents
+                timestep = t.unsqueeze(0)
+
+                if legacy_model_to_each_step:
+                    t0 = profiler.start()
+                    self.model.to(self.device)
+                    profiler.stop("dit_to_device_per_step", t0, per_step=True)
+
                 if get_classifier_free_guidance_world_size() == 2:
+                    t0 = profiler.start()
                     noise_pred = self.model(
-                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx)[0]
+                        latent_model_input, t=timestep, **arg_all, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
+                    profiler.stop("dit_forward", t0, per_step=True)
+
+                    t0 = profiler.start()
                     noise_pred_cond, noise_pred_uncond = get_cfg_group().all_gather(
                         noise_pred, separate_tensors=True
                     )
+                    profiler.stop("cfg_allgather", t0, per_step=True)
                 else:
-                    noise_pred_cond = self.model(
-                        latent_model_input, t=timestep, **arg_c, t_idx=t_idx)[0]
-                    noise_pred_uncond = self.model(
-                        latent_model_input, t=timestep, **arg_null, t_idx=t_idx)[0]
+                    if cfg_fused_forward:
+                        t0 = profiler.start()
+                        fused_context_emb = None
+                        if arg_c['context_emb'] is not None and arg_null['context_emb'] is not None:
+                            fused_context_emb = torch.cat([arg_c['context_emb'], arg_null['context_emb']], dim=0)
+                        noise_pred_pair = self.model(
+                            [latent_model_input[0], latent_model_input[0]],
+                            t=timestep.repeat(2),
+                            context=[context[0], context_null[0]],
+                            seq_len=seq_len,
+                            t_idx=t_idx,
+                            block_profiler=block_profiler,
+                            context_emb=fused_context_emb,
+                            cache_cross_kv=cache_cross_kv,
+                        )
+                        noise_pred_cond, noise_pred_uncond = noise_pred_pair
+                        profiler.stop("dit_forward_cfg_fused", t0, per_step=True)
+                    else:
+                        t0 = profiler.start()
+                        noise_pred_cond = self.model(
+                            latent_model_input, t=timestep, **arg_c, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
+                        profiler.stop("dit_forward_cond", t0, per_step=True)
 
+                        t0 = profiler.start()
+                        noise_pred_uncond = self.model(
+                            latent_model_input, t=timestep, **arg_null, t_idx=t_idx, cache_cross_kv=cache_cross_kv)[0]
+                        profiler.stop("dit_forward_uncond", t0, per_step=True)
+
+                t0 = profiler.start()
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
+                profiler.stop("cfg_combine", t0, per_step=True)
 
+                t0 = profiler.start()
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
                     t,
                     latents[0].unsqueeze(0),
                     return_dict=False,
                     generator=seed_g)[0]
+                profiler.stop("scheduler_step", t0, per_step=True)
                 latents = [temp_x0.squeeze(0)]
+                profiler.stop("denoise_step_total", step_start, per_step=True)
+            profiler.stop("denoise_loop_total", denoise_loop_start)
 
             x0 = latents
             if offload_model:
+                t0 = profiler.start()
                 self.model.cpu()
                 torch.cuda.empty_cache()
+                profiler.stop("dit_offload_cpu", t0)
 
+            videos = None
             if self.rank < 8:
+                t0 = profiler.start()
                 with VAE_patch_parallel():
                     videos = self.vae.decode(x0)
+                profiler.stop("vae_decode", t0)
+            elif profile_stage:
+                profiler.stage_totals_ms.setdefault("vae_decode", 0.0)
 
         del noise, latents
         del sample_scheduler
 
         if self.dit_fsdp:
-            self.model._fsdp_wrapped_module.freqs_list = None
+            self.model._fsdp_wrapped_module.clear_runtime_caches()
         else:
-            self.model.freqs_list = None
+            self.model.clear_runtime_caches()
             
         if offload_model:
+            t0 = profiler.start()
             gc.collect()
             torch.cuda.synchronize()
+            profiler.stop("post_gc_sync", t0)
         if dist.is_initialized():
+            t0 = profiler.start()
             dist.barrier()
+            profiler.stop("final_barrier", t0)
+
+        profiler.stop("request_total", total_start)
+        profiler.report()
+        report_attention_profiler()
+        report_block_profiler()
 
         return videos[0] if self.rank == 0 else None
-
