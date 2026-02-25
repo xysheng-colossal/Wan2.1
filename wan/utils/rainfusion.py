@@ -302,9 +302,17 @@ class Rainfusion(torch.nn.Module):
                 if self.layout_transform and use_local:
                     out_img = out[:, :-text_len, :, :]
                     out_txt = out[:, -text_len:, :, :]
-                    out_img = rearrange(out_img, \
-                            'b (h1 w t) n h -> b (t h1 w) n h', \
-                            t=self.grid_size[0] - 1, h1=self.grid_size[1], w=self.grid_size[2])
+                    # Infer temporal length from runtime token count to keep
+                    # rainfusion compatible with fused CFG paths.
+                    frame_tokens = self.grid_size[1] * self.grid_size[2]
+                    if out_img.shape[1] % frame_tokens == 0:
+                        out_img = rearrange(
+                            out_img,
+                            'b (h1 w t) n h -> b (t h1 w) n h',
+                            t=out_img.shape[1] // frame_tokens,
+                            h1=self.grid_size[1],
+                            w=self.grid_size[2],
+                        )
                     out = torch.cat([out_img, out_txt], 1)
             else:
                 if self.use_la:

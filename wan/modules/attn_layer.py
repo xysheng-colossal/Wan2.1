@@ -5,6 +5,7 @@ import torch_npu
 import torch.distributed as dist
 import math
 import os
+import time
 from yunchang import LongContextAttention
 try:
     from yunchang.kernels import AttnType
@@ -14,12 +15,118 @@ from typing import Any
 
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
+from ..distributed.comm_order import record_last_a2a_done_event
 from wan.utils.rainfusion import Rainfusion
+from wan.utils.attention_profile import get_attention_profiler
 
 from mindiesd import attention_forward
 
 logger = logging.getLogger(__name__)
 MAX_TOKEN = 2147483647
+_QKV_A2A_MODE_LOGGED = False
+_A2A_FENCE_MODE_LOGGED = False
+_A2A_EVENT_GATE_LOGGED = False
+_A2A_COMM_STREAM = {}
+
+
+def _device_sync_if_needed(enabled):
+    if not enabled:
+        return
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.synchronize()
+    elif torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _resolve_a2a_fence_mode():
+    raw_mode = os.getenv("WAN_A2A_FENCE", "0").strip().lower()
+    if raw_mode in ("0", "off", "false", ""):
+        return 0, "disabled"
+    if raw_mode in ("1", "pre_qkv", "pre_qkv_only", "light"):
+        return 1, "pre_qkv_only"
+    if raw_mode in ("2", "full", "all"):
+        return 2, "full"
+    return 0, f"invalid({raw_mode})->disabled"
+
+
+def _resolve_a2a_event_gate():
+    raw = os.getenv("WAN_A2A_EVENT_GATE", "0").strip().lower()
+    if raw in ("0", "off", "false", ""):
+        return False, "disabled"
+    if raw in ("1", "on", "true", "gate"):
+        return True, "enabled"
+    return False, f"invalid({raw})->disabled"
+
+
+def _get_device_api():
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.npu
+    if torch.cuda.is_available():
+        return torch.cuda
+    return None
+
+
+def _get_a2a_comm_stream():
+    device_api = _get_device_api()
+    if device_api is None:
+        return None
+    device_idx = device_api.current_device()
+    stream = _A2A_COMM_STREAM.get(device_idx)
+    if stream is None:
+        stream = device_api.Stream()
+        _A2A_COMM_STREAM[device_idx] = stream
+    return stream
+
+
+def _all_to_all_with_event_gate(
+    input_,
+    scatter_idx,
+    gather_idx,
+    group,
+    enable_event_gate,
+    record_as_last_a2a=False,
+):
+    if not enable_event_gate:
+        output = all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+        if record_as_last_a2a:
+            record_last_a2a_done_event()
+        return output
+
+    device_api = _get_device_api()
+    comm_stream = _get_a2a_comm_stream()
+    if device_api is None or comm_stream is None:
+        output = all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+        if record_as_last_a2a:
+            record_last_a2a_done_event()
+        return output
+
+    current_stream = device_api.current_stream()
+    ready_event = device_api.Event()
+    done_event = device_api.Event()
+    ready_event.record(current_stream)
+    comm_stream.wait_event(ready_event)
+    with device_api.stream(comm_stream):
+        output = all_to_all_4D(
+            input_=input_,
+            scatter_idx=scatter_idx,
+            gather_idx=gather_idx,
+            group=group,
+        )
+        done_event.record(comm_stream)
+    current_stream.wait_event(done_event)
+    if record_as_last_a2a:
+        record_last_a2a_done_event()
+    return output
 
 class xFuserLongContextAttention(LongContextAttention):
     ring_impl_type_supported_kv_cache = ["basic"]
@@ -120,21 +227,167 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
 
-        query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+        profiler = get_attention_profiler()
+
+        def profile_start():
+            return profiler.start() if profiler is not None else None
+
+        def profile_stop(stage_name, start_time):
+            if profiler is not None:
+                profiler.stop(stage_name, start_time, step_idx=t_idx)
+
+        def profile_collective_skew(stage_name, launch_time, end_time, group):
+            if profiler is not None and hasattr(profiler, "record_collective_skew"):
+                profiler.record_collective_skew(
+                    stage_name=stage_name,
+                    launch_time=launch_time,
+                    end_time=end_time,
+                    group=group,
+                    step_idx=t_idx,
+                )
+
+        def profile_op_skew(stage_name, launch_time, end_time, group):
+            if profiler is not None and hasattr(profiler, "record_op_skew"):
+                profiler.record_op_skew(
+                    stage_name=stage_name,
+                    launch_time=launch_time,
+                    end_time=end_time,
+                    group=group,
+                    step_idx=t_idx,
+                )
+
+        total_start = profile_start()
+
+        use_packed_qkv_a2a = os.getenv("WAN_PACKED_QKV_A2A", "1") != "0"
+        a2a_fence_mode, a2a_fence_mode_name = _resolve_a2a_fence_mode()
+        a2a_event_gate_enabled, a2a_event_gate_name = _resolve_a2a_event_gate()
+        fence_before_qkv = a2a_fence_mode >= 1
+        fence_full = a2a_fence_mode >= 2
+        global _QKV_A2A_MODE_LOGGED
+        global _A2A_FENCE_MODE_LOGGED
+        global _A2A_EVENT_GATE_LOGGED
+        if not _QKV_A2A_MODE_LOGGED:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                mode = "packed_qkv_single_all_to_all" if use_packed_qkv_a2a else "legacy_qkv_three_all_to_all"
+                logger.info(f"Attention all_to_all mode: {mode} (WAN_PACKED_QKV_A2A={'1' if use_packed_qkv_a2a else '0'})")
+            _QKV_A2A_MODE_LOGGED = True
+        if not _A2A_FENCE_MODE_LOGGED:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                logger.info(
+                    f"Attention all_to_all fence mode: {a2a_fence_mode_name} "
+                    f"(WAN_A2A_FENCE={os.getenv('WAN_A2A_FENCE', '0')})"
+                )
+            _A2A_FENCE_MODE_LOGGED = True
+        if not _A2A_EVENT_GATE_LOGGED:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                logger.info(
+                    f"Attention all_to_all event gate: {a2a_event_gate_name} "
+                    f"(WAN_A2A_EVENT_GATE={os.getenv('WAN_A2A_EVENT_GATE', '0')})"
+                )
+            _A2A_EVENT_GATE_LOGGED = True
+        if use_packed_qkv_a2a:
+            _device_sync_if_needed(fence_before_qkv)
+            t0 = profile_start()
+            c0 = time.perf_counter()
+            qkv = torch.cat([query, key, value], dim=-1)
+            c1 = time.perf_counter()
+            profile_stop("qkv_concat", t0)
+            profile_op_skew("qkv_concat", c0, c1, self.ulysses_pg)
+
+            t0 = profile_start()
+            c0 = time.perf_counter()
+            qkv_layer = _all_to_all_with_event_gate(
+                input_=qkv,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
+            )
+            c1 = time.perf_counter()
+            profile_stop("qkv_all_to_all", t0)
+            profile_collective_skew("qkv_all_to_all", c0, c1, self.ulysses_pg)
+
+            t0 = profile_start()
+            q_dim = query.shape[-1]
+            k_dim = key.shape[-1]
+            v_dim = value.shape[-1]
+            c0 = time.perf_counter()
+            query_layer, key_layer, value_layer = torch.split(
+                qkv_layer, [q_dim, k_dim, v_dim], dim=-1
+            )
+            c1 = time.perf_counter()
+            profile_stop("qkv_split", t0)
+            profile_op_skew("qkv_split", c0, c1, self.ulysses_pg)
+        else:
+            _device_sync_if_needed(fence_before_qkv)
+            t0 = profile_start()
+            c0 = time.perf_counter()
+            query_layer = _all_to_all_with_event_gate(
+                input_=query,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
+            )
+            c1 = time.perf_counter()
+            profile_stop("q_all_to_all", t0)
+            profile_collective_skew("q_all_to_all", c0, c1, self.ulysses_pg)
+
+            _device_sync_if_needed(fence_full)
+            t0 = profile_start()
+            c0 = time.perf_counter()
+            key_layer = _all_to_all_with_event_gate(
+                input_=key,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
+            )
+            c1 = time.perf_counter()
+            profile_stop("k_all_to_all", t0)
+            profile_collective_skew("k_all_to_all", c0, c1, self.ulysses_pg)
+
+            _device_sync_if_needed(fence_full)
+            t0 = profile_start()
+            c0 = time.perf_counter()
+            value_layer = _all_to_all_with_event_gate(
+                input_=value,
+                scatter_idx=2,
+                gather_idx=1,
+                group=self.ulysses_pg,
+                enable_event_gate=a2a_event_gate_enabled,
+                record_as_last_a2a=False,
+            )
+            c1 = time.perf_counter()
+            profile_stop("v_all_to_all", t0)
+            profile_collective_skew("v_all_to_all", c0, c1, self.ulysses_pg)
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size
             b, s, n, d = key_layer.shape
             k_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            t0 = profile_start()
+            c0 = time.perf_counter()
             dist.all_gather_into_tensor(k_full, key_layer, group=self.ring_pg)
+            c1 = time.perf_counter()
             key_layer = k_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+            profile_stop("kv_ring_k_all_gather", t0)
+            profile_collective_skew("kv_ring_k_all_gather", c0, c1, self.ring_pg)
 
             v_full = torch.empty([ring_size, b, s, n, d], dtype=query_layer.dtype, device=query_layer.device)
+            t0 = profile_start()
+            c0 = time.perf_counter()
             dist.all_gather_into_tensor(v_full, value_layer, group=self.ring_pg)
+            c1 = time.perf_counter()
             value_layer = v_full.permute(1, 0, 2, 3, 4).reshape(b, -1, n, d)
+            profile_stop("kv_ring_v_all_gather", t0)
+            profile_collective_skew("kv_ring_v_all_gather", c0, c1, self.ring_pg)
 
+        t0 = profile_start()
+        c0 = time.perf_counter()
         if self.rainfusion_config is not None:
             out = self.rainfusion_fa(
                 query_layer,
@@ -171,6 +424,9 @@ class xFuserLongContextAttention(LongContextAttention):
 
                 output.append(out)
             out = torch.cat(output, dim=2)
+        c1 = time.perf_counter()
+        profile_stop("attn_kernel", t0)
+        profile_op_skew("attn_kernel", c0, c1, self.ulysses_pg)
 
         if type(out) == tuple:
             context_layer, _, _ = out
@@ -179,7 +435,20 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
+        _device_sync_if_needed(fence_full)
+        t0 = profile_start()
+        c0 = time.perf_counter()
+        output = _all_to_all_with_event_gate(
+            input_=context_layer,
+            scatter_idx=1,
+            gather_idx=2,
+            group=self.ulysses_pg,
+            enable_event_gate=a2a_event_gate_enabled,
+            record_as_last_a2a=True,
+        )
+        c1 = time.perf_counter()
+        profile_stop("out_all_to_all", t0)
+        profile_collective_skew("out_all_to_all", c0, c1, self.ulysses_pg)
+        profile_stop("attn_forward_total", total_start)
 
         return output
-
