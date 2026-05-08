@@ -13,7 +13,7 @@ except ImportError:
 from typing import Any
 
 from ..distributed.parallel_mgr import get_sp_group
-from ..distributed.comm import all_to_all_4D
+from ..distributed.comm import all_to_all_4D, all_to_all_4D_qkv_packed
 from wan.utils.rainfusion import Rainfusion
 
 from mindiesd import attention_forward
@@ -120,9 +120,24 @@ class xFuserLongContextAttention(LongContextAttention):
             * output (Tensor): context output
         """
 
-        query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
-        value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+        use_packed_qkv_a2a = int(os.getenv("WAN_PACK_QKV_A2A", 0)) == 1
+        verify_packed_qkv_a2a = int(os.getenv("WAN_PACK_QKV_A2A_VERIFY", 0)) == 1
+
+        if use_packed_qkv_a2a:
+            query_layer, key_layer, value_layer = all_to_all_4D_qkv_packed(
+                query, key, value, group=self.ulysses_pg
+            )
+            if verify_packed_qkv_a2a:
+                ref_query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+                ref_key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+                ref_value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+                torch.testing.assert_close(query_layer, ref_query_layer, rtol=0, atol=0)
+                torch.testing.assert_close(key_layer, ref_key_layer, rtol=0, atol=0)
+                torch.testing.assert_close(value_layer, ref_value_layer, rtol=0, atol=0)
+        else:
+            query_layer = all_to_all_4D(input_=query, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+            key_layer = all_to_all_4D(input_=key, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
+            value_layer = all_to_all_4D(input_=value, scatter_idx=2, gather_idx=1, group=self.ulysses_pg)
 
         if get_sp_group().ring_world_size > 1:
             ring_size = get_sp_group().ring_world_size
@@ -182,4 +197,3 @@ class xFuserLongContextAttention(LongContextAttention):
         output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
 
         return output
-
