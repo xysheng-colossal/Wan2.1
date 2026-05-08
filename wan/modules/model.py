@@ -1,6 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
 import logging
+import os
 import torch
 import torch_npu
 import torch.cuda.amp as amp
@@ -291,6 +292,38 @@ class WanAttentionBlock(nn.Module):
 
         self.args = None
 
+    @staticmethod
+    def _npu_ffn_bias(bias, x):
+        if bias is None:
+            return None
+        if x.dtype == torch.bfloat16 and bias.dtype != torch.float32:
+            return bias.float()
+        return bias
+
+    def _ffn_forward(self, x):
+        if int(os.getenv("WAN_FUSED_FFN", 0)) != 1:
+            return self.ffn(x)
+
+        fc1, _, fc2 = self.ffn
+        inner_precise = 0 if x.dtype == torch.bfloat16 else 1
+        y = torch_npu.npu_ffn(
+            x,
+            fc1.weight.transpose(0, 1),
+            fc2.weight.transpose(0, 1),
+            "gelu",
+            bias1=self._npu_ffn_bias(fc1.bias, x),
+            bias2=self._npu_ffn_bias(fc2.bias, x),
+            inner_precise=inner_precise,
+        )
+
+        if int(os.getenv("WAN_FUSED_FFN_VERIFY", 0)) == 1:
+            ref = self.ffn(x)
+            rtol = float(os.getenv("WAN_FUSED_FFN_VERIFY_RTOL", "2e-2"))
+            atol = float(os.getenv("WAN_FUSED_FFN_VERIFY_ATOL", "2e-2"))
+            torch.testing.assert_close(y, ref, rtol=rtol, atol=atol)
+
+        return y
+
 
     def forward(
         self,
@@ -335,7 +368,7 @@ class WanAttentionBlock(nn.Module):
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
-            y = self.ffn(self.norm2(x, 1 + e[4], e[3]))
+            y = self._ffn_forward(self.norm2(x, 1 + e[4], e[3]))
             # y = self.ffn(self.norm2(x) * (1 + e[4]) + e[3])
             # with amp.autocast(dtype=torch.float32):
             x = x + y * e[5]
