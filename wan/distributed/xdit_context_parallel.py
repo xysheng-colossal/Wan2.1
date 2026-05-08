@@ -1,16 +1,65 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
+import os
 import torch
 import torch.cuda.amp as amp
+import torch.distributed as dist
+import torch_npu
 from .parallel_mgr import (get_sequence_parallel_rank,
                             get_sequence_parallel_world_size,
                             get_sp_group,
                             )
 from ..modules.attn_layer import xFuserLongContextAttention
+from .comm import all_to_all_4D
 
 from ..modules.model import sinusoidal_embedding_1d
 from wan.utils.rainfusion import Rainfusion
 from mindiesd import rotary_position_embedding
+
+
+def _get_hccl_comm_name(group):
+    backend = group._get_backend(torch.device("npu"))
+    get_name = backend.get_hccl_comm_name
+    rank = dist.get_rank(group)
+    try:
+        return get_name(rank)
+    except TypeError:
+        return get_name()
+
+
+def _out_proj_reduce_scatter(context_layer, proj, group):
+    b, seqlen, shard_hc, hs = context_layer.shape
+    world_size = dist.get_world_size(group)
+    if world_size == 1:
+        return proj(context_layer.flatten(2))
+
+    shard_dim = shard_hc * hs
+    dim = shard_dim * world_size
+    assert proj.in_features == dim, (
+        f"o_proj in_features {proj.in_features} does not match gathered dim {dim}"
+    )
+    assert seqlen % world_size == 0, (
+        f"sequence length {seqlen} must be divisible by world size {world_size}"
+    )
+
+    rank = dist.get_rank(group)
+    weight_shard = proj.weight[:, rank * shard_dim:(rank + 1) * shard_dim]
+    mm_weight = weight_shard.transpose(0, 1).contiguous()
+    mm_input = context_layer.permute(1, 0, 2, 3).reshape(seqlen * b, shard_dim).contiguous()
+    hcom = _get_hccl_comm_name(group)
+    output = torch_npu.npu_mm_reduce_scatter_base(
+        mm_input,
+        mm_weight,
+        hcom,
+        world_size,
+        reduce_op="sum",
+    )
+
+    shard_seqlen = seqlen // world_size
+    output = output.reshape(shard_seqlen, b, dim).permute(1, 0, 2).contiguous()
+    if proj.bias is not None:
+        output = output + proj.bias
+    return output
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -204,10 +253,20 @@ def usp_attn_forward(self,
         t_idx=t_idx,
     )
 
-    # TODO: padding after attention.
-    # x = torch.cat([x, x.new_zeros(b, s - x.size(1), n, d)], dim=1)
+    if int(os.getenv("WAN_OUT_PROJ_RS", 0)) == 1:
+        context_layer = x
+        x = _out_proj_reduce_scatter(context_layer, self.o, get_sp_group().ulysses_group)
+        if int(os.getenv("WAN_OUT_PROJ_RS_VERIFY", 0)) == 1:
+            ref = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=get_sp_group().ulysses_group)
+            ref = self.o(ref.flatten(2))
+            rtol = float(os.getenv("WAN_OUT_PROJ_RS_VERIFY_RTOL", "1e-2"))
+            atol = float(os.getenv("WAN_OUT_PROJ_RS_VERIFY_ATOL", "1e-2"))
+            torch.testing.assert_close(x, ref, rtol=rtol, atol=atol)
+    else:
+        # TODO: padding after attention.
+        # x = torch.cat([x, x.new_zeros(b, s - x.size(1), n, d)], dim=1)
 
-    # output
-    x = x.flatten(2)
-    x = self.o(x)
+        # output
+        x = x.flatten(2)
+        x = self.o(x)
     return x

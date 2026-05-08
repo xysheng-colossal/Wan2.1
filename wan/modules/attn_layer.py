@@ -177,9 +177,11 @@ class xFuserLongContextAttention(LongContextAttention):
         else:
             context_layer = out
 
+        if int(os.getenv("WAN_OUT_PROJ_RS", 0)) == 1:
+            return context_layer
+
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
         output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
 
         return output
-
