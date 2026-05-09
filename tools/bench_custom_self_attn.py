@@ -1,14 +1,19 @@
 import argparse
+import importlib.util
 import os
+from pathlib import Path
 import time
 
 import torch
 
-from wan.ops.custom_attention import (
-    _direct_bsnd_self_attention,
-    _reference_self_attention,
-    custom_self_attention_or_fallback,
-)
+CUSTOM_ATTENTION_PATH = Path(__file__).resolve().parents[1] / "wan" / "ops" / "custom_attention.py"
+spec = importlib.util.spec_from_file_location("custom_attention_bench", CUSTOM_ATTENTION_PATH)
+custom_attention = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(custom_attention)
+
+_direct_bsnd_self_attention = custom_attention._direct_bsnd_self_attention
+_reference_self_attention = custom_attention._reference_self_attention
+custom_self_attention_or_fallback = custom_attention.custom_self_attention_or_fallback
 
 
 def _sync():
@@ -81,4 +86,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
