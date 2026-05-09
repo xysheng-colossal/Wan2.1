@@ -14,6 +14,7 @@ from typing import Any
 
 from ..distributed.parallel_mgr import get_sp_group
 from ..distributed.comm import all_to_all_4D
+from ..ops.custom_attention import custom_self_attention_or_fallback
 from wan.utils.rainfusion import Rainfusion
 
 from mindiesd import attention_forward
@@ -146,8 +147,7 @@ class xFuserLongContextAttention(LongContextAttention):
             )
         elif self.use_all_head:
             if self.algo == 0:
-                out = attention_forward(query_layer, key_layer, value_layer,
-                                        opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
+                out = custom_self_attention_or_fallback(query_layer, key_layer, value_layer, scale=softmax_scale)
             elif self.algo == 1:
                 out = attention_forward(query_layer, key_layer, value_layer,
                                         opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
@@ -182,4 +182,3 @@ class xFuserLongContextAttention(LongContextAttention):
         output = all_to_all_4D(input_=context_layer, scatter_idx=1, gather_idx=2, group=self.ulysses_pg)
 
         return output
-
