@@ -159,7 +159,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 text_len=0,
                 t_idx=t_idx,
             )
-        elif self.use_all_head:
+        elif self.use_all_head and not _env_flag("WAN_SPLIT_HEAD_ATTN"):
             if self.algo == 0:
                 out = custom_self_attention_or_fallback(query_layer, key_layer, value_layer, scale=softmax_scale)
             elif self.algo == 1:
@@ -185,6 +185,16 @@ class xFuserLongContextAttention(LongContextAttention):
 
                 output.append(out)
             out = torch.cat(output, dim=2)
+            if self.use_all_head and _env_flag("WAN_SPLIT_HEAD_ATTN_VERIFY"):
+                if self.algo == 0:
+                    ref_out = attention_forward(query_layer, key_layer, value_layer,
+                                            opt_mode="manual", op_type="fused_attn_score", layout="BNSD")
+                elif self.algo == 1:
+                    ref_out = attention_forward(query_layer, key_layer, value_layer,
+                                            opt_mode="manual", op_type="ascend_laser_attention", layout="BNSD")
+                else:
+                    raise ValueError(f"select flash attention algorithm only support 0, 1, but got f{self.algo}")
+                torch.testing.assert_close(out, ref_out, rtol=0, atol=0)
 
         if type(out) == tuple:
             context_layer, _, _ = out
