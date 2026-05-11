@@ -3,6 +3,60 @@ import torch
 import torch.distributed as dist
 
 
+def _prepare_heads_to_sequence(input_: torch.Tensor, seq_world_size: int) -> torch.Tensor:
+    bs, shard_seqlen, hc, hs = input_.shape
+    shard_hc = hc // seq_world_size
+    return (
+        input_.reshape(bs, shard_seqlen, seq_world_size, shard_hc, hs)
+        .transpose(0, 2)
+        .contiguous()
+    )
+
+
+def _restore_heads_to_sequence(input_: torch.Tensor, bs: int, seqlen: int) -> torch.Tensor:
+    _, _, _, shard_hc, hs = input_.shape
+    return input_.reshape(seqlen, bs, shard_hc, hs).transpose(0, 1).contiguous().reshape(bs, seqlen, shard_hc, hs)
+
+
+def all_to_all_4D_qkv_packed(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, group=None, use_sync: bool = False
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Pack the three Q/K/V Ulysses all-to-all operations into one collective.
+
+    This is equivalent to calling all_to_all_4D(..., scatter_idx=2, gather_idx=1)
+    for query, key, and value independently. The packed buffer concatenates the
+    prepared tensors along the local sequence shard dimension.
+    """
+    assert query.dim() == key.dim() == value.dim() == 4
+    assert query.shape == key.shape == value.shape
+
+    seq_world_size = dist.get_world_size(group)
+    bs, shard_seqlen, hc, _ = query.shape
+    assert hc % seq_world_size == 0
+
+    query_t = _prepare_heads_to_sequence(query, seq_world_size)
+    key_t = _prepare_heads_to_sequence(key, seq_world_size)
+    value_t = _prepare_heads_to_sequence(value, seq_world_size)
+    packed_input = torch.cat((query_t, key_t, value_t), dim=1)
+    packed_output = torch.empty_like(packed_input)
+
+    if seq_world_size > 1:
+        dist.all_to_all_single(packed_output, packed_input, group=group)
+        if use_sync:
+            torch.npu.synchronize()
+    else:
+        packed_output = packed_input
+
+    query_out, key_out, value_out = packed_output.split(shard_seqlen, dim=1)
+    seqlen = shard_seqlen * seq_world_size
+    return (
+        _restore_heads_to_sequence(query_out, bs, seqlen),
+        _restore_heads_to_sequence(key_out, bs, seqlen),
+        _restore_heads_to_sequence(value_out, bs, seqlen),
+    )
+
+
 def all_to_all_4D(
         input_: torch.tensor, scatter_idx: int = 2, gather_idx: int = 1, group=None, use_sync: bool = False
 ) -> torch.tensor:
@@ -29,15 +83,10 @@ def all_to_all_4D(
         # input_ (torch.tensor): a tensor sharded along dim 1 (bs, seqlen/P, hc, hs) output: (bs, seqlen, hc/P, hs)
         bs, shard_seqlen, hc, hs = input_.shape
         seqlen = shard_seqlen * seq_world_size
-        shard_hc = hc // seq_world_size
 
         # transpose groups of heads with the seq-len parallel dimension, so that we can scatter them!
         # (bs, seqlen/P, hc, hs) -reshape-> (bs, seq_len/P, P, hc/P, hs) -transpose(0,2)-> (P, seq_len/P, bs, hc/P, hs)
-        input_t = (
-            input_.reshape(bs, shard_seqlen, seq_world_size, shard_hc, hs)
-            .transpose(0, 2)
-            .contiguous()
-        )
+        input_t = _prepare_heads_to_sequence(input_, seq_world_size)
 
         output = torch.empty_like(input_t)
         # https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single
@@ -50,12 +99,7 @@ def all_to_all_4D(
         else:
             output = input_t
         # if scattering the seq-dim, transpose the heads back to the original dimension
-        output = output.reshape(seqlen, bs, shard_hc, hs)
-
-        # (seq_len, bs, hc/P, hs) -reshape-> (bs, seq_len, hc/P, hs)
-        output = output.transpose(0, 1).contiguous().reshape(bs, seqlen, shard_hc, hs)
-
-        return output
+        return _restore_heads_to_sequence(output, bs, seqlen)
 
     elif scatter_idx == 1 and gather_idx == 2:
         # input_ (torch.tensor): a tensor sharded along dim 1 (bs, seqlen, hc/P, hs) output: (bs, seqlen/P, hc, hs)
