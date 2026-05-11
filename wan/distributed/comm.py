@@ -13,6 +13,12 @@ def _prepare_heads_to_sequence(input_: torch.Tensor, seq_world_size: int) -> tor
     )
 
 
+def _copy_heads_to_sequence(output: torch.Tensor, input_: torch.Tensor, seq_world_size: int) -> None:
+    bs, shard_seqlen, hc, hs = input_.shape
+    shard_hc = hc // seq_world_size
+    output.copy_(input_.reshape(bs, shard_seqlen, seq_world_size, shard_hc, hs).transpose(0, 2))
+
+
 def _restore_heads_to_sequence(input_: torch.Tensor, bs: int, seqlen: int) -> torch.Tensor:
     _, _, _, shard_hc, hs = input_.shape
     return input_.reshape(seqlen, bs, shard_hc, hs).transpose(0, 1).contiguous().reshape(bs, seqlen, shard_hc, hs)
@@ -34,11 +40,16 @@ def all_to_all_4D_qkv_packed(
     seq_world_size = dist.get_world_size(group)
     bs, shard_seqlen, hc, _ = query.shape
     assert hc % seq_world_size == 0
+    shard_hc = hc // seq_world_size
 
-    query_t = _prepare_heads_to_sequence(query, seq_world_size)
-    key_t = _prepare_heads_to_sequence(key, seq_world_size)
-    value_t = _prepare_heads_to_sequence(value, seq_world_size)
-    packed_input = torch.cat((query_t, key_t, value_t), dim=1)
+    packed_input = torch.empty(
+        (seq_world_size, 3 * shard_seqlen, bs, shard_hc, query.shape[-1]),
+        dtype=query.dtype,
+        device=query.device,
+    )
+    _copy_heads_to_sequence(packed_input[:, :shard_seqlen], query, seq_world_size)
+    _copy_heads_to_sequence(packed_input[:, shard_seqlen:2 * shard_seqlen], key, seq_world_size)
+    _copy_heads_to_sequence(packed_input[:, 2 * shard_seqlen:], value, seq_world_size)
     packed_output = torch.empty_like(packed_input)
 
     if seq_world_size > 1:
