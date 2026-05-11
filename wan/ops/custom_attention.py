@@ -60,6 +60,24 @@ def _direct_bsnd_self_attention(
     )[0]
 
 
+def _infer_bnsd_self_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale: float | None,
+):
+    if scale is None:
+        scale = query.shape[-1] ** -0.5
+    return torch_npu.npu_fused_infer_attention_score(
+        query.transpose(1, 2),
+        key.transpose(1, 2),
+        value.transpose(1, 2),
+        num_heads=query.shape[-2],
+        input_layout="BNSD",
+        scale=scale,
+    )[0].transpose(1, 2)
+
+
 def custom_self_attention_or_fallback(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -78,6 +96,8 @@ def custom_self_attention_or_fallback(
     impl = os.getenv("WAN_CUSTOM_SELF_ATTN_IMPL", "direct_bsnd")
     if impl == "direct_bsnd":
         out = _direct_bsnd_self_attention(query, key, value, scale)
+    elif impl == "infer_bnsd":
+        out = _infer_bnsd_self_attention(query, key, value, scale)
     elif impl == "mindiesd_bsnd":
         out = attention_forward(
             query,
@@ -102,4 +122,3 @@ def custom_self_attention_or_fallback(
         torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
 
     return out
-

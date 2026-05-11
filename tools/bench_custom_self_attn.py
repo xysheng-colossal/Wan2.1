@@ -12,6 +12,7 @@ custom_attention = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(custom_attention)
 
 _direct_bsnd_self_attention = custom_attention._direct_bsnd_self_attention
+_infer_bnsd_self_attention = custom_attention._infer_bnsd_self_attention
 _reference_self_attention = custom_attention._reference_self_attention
 custom_self_attention_or_fallback = custom_attention.custom_self_attention_or_fallback
 
@@ -76,11 +77,14 @@ def main():
     )
 
     direct = _direct_bsnd_self_attention(q, k, v, None)
+    infer = _infer_bnsd_self_attention(q, k, v, None)
     _sync()
     diff = (custom.float() - ref.float()).abs()
     direct_diff = (direct.float() - ref.float()).abs()
+    infer_diff = (infer.float() - ref.float()).abs()
     print(f"custom_diff max={diff.max().item():.6f} mean={diff.mean().item():.6f}")
     print(f"direct_diff max={direct_diff.max().item():.6f} mean={direct_diff.mean().item():.6f}")
+    print(f"infer_diff max={infer_diff.max().item():.6f} mean={infer_diff.mean().item():.6f}")
     torch.testing.assert_close(custom, ref, rtol=args.rtol, atol=args.atol)
 
 
