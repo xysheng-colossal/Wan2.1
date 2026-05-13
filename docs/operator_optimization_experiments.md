@@ -360,24 +360,24 @@ torch_npu.npu_fusion_attention(q, k, v, head_num=10, input_layout="BSND")
 
 ## Profile 观察
 
-本地已有 FSDP detailed profile 的 `op_summary` 聚合显示：
+本地已有 FSDP detailed profile 的 `op_summary` 单卡平均显示：
 
-| 算子 | 累计耗时 | 调用数 |
+| 算子 | 单卡平均耗时 | 调用数 |
 | --- | ---: | ---: |
-| `aclnnFlashAttentionScore_FlashAttentionScore_FlashAttentionScore` | `247300.994 ms` | `12884` |
-| `aclnnAddmm_MatMulV3Common_MatMulV3` | `108254.057 ms` | `51200` |
-| `aclnnInplaceCopy_TransposeAiCore_Transpose` | `8954.008 ms` | `39028` |
-| `RotaryPositionEmbedding2` | `5634.530 ms` | `12800` |
-| `aclnnCast_CastAiCore_Cast` | `4664.799 ms` | `50020` |
-| `aclnnFlashAttentionScore_TransposeAiCore_Transpose` | `4269.243 ms` | `38400` |
-| `aclnnGelu_Gelu_Gelu` | `2768.578 ms` | `6560` |
+| `aclnnFlashAttentionScore_FlashAttentionScore_FlashAttentionScore` | `61825.249 ms` | `12884` |
+| `aclnnAddmm_MatMulV3Common_MatMulV3` | `27063.514 ms` | `51200` |
+| `aclnnInplaceCopy_TransposeAiCore_Transpose` | `2238.502 ms` | `39028` |
+| `RotaryPositionEmbedding2` | `1408.633 ms` | `12800` |
+| `aclnnCast_CastAiCore_Cast` | `1166.200 ms` | `50020` |
+| `aclnnFlashAttentionScore_TransposeAiCore_Transpose` | `1067.311 ms` | `38400` |
+| `aclnnGelu_Gelu_Gelu` | `692.145 ms` | `6560` |
 
 口径说明：
 
-- 这里的“累计耗时”是把所有 `op_summary*.csv` 中同名算子的 `Task Duration(us)` 累加后换算成 ms。
-- 该 profile 有 4 个 rank/device 的 `op_summary` 文件，聚合值约等于 4 卡设备侧时间总和，不是 20-step 的墙钟时间。
-- 例如 `FlashAttentionScore` 的 `247300.994 ms` 除以 4 卡后约为 `61.825s/device`，和 20-step 生成墙钟约 `123s` 并不矛盾。
-- 多 stream、通信/计算 overlap、profile 采集开销也会让“各算子累计和”大于端到端墙钟时间。
+- 表格数值为 4 个 rank/device 的同名算子 `Task Duration(us)` 聚合后除以 4，换算成单卡平均 ms。
+- 调用数仍保留聚合调用数，用于观察总调用规模；如果要看单卡调用数，也可再除以 4。
+- 例如 `FlashAttentionScore` 的原聚合值为 `247300.994 ms`，表中写成单卡平均 `61825.249 ms`。
+- 多 stream、通信/计算 overlap、profile 采集开销仍会让“单卡各算子累计和”大于端到端墙钟时间。
 - 因此这张表只用于判断热点排序和优化方向，不应用来直接和 `Generating video used time` 做绝对值对比。
 
 判断：
