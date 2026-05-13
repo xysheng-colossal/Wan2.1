@@ -372,6 +372,14 @@ torch_npu.npu_fusion_attention(q, k, v, head_num=10, input_layout="BSND")
 | `aclnnFlashAttentionScore_TransposeAiCore_Transpose` | `4269.243 ms` | `38400` |
 | `aclnnGelu_Gelu_Gelu` | `2768.578 ms` | `6560` |
 
+口径说明：
+
+- 这里的“累计耗时”是把所有 `op_summary*.csv` 中同名算子的 `Task Duration(us)` 累加后换算成 ms。
+- 该 profile 有 4 个 rank/device 的 `op_summary` 文件，聚合值约等于 4 卡设备侧时间总和，不是 20-step 的墙钟时间。
+- 例如 `FlashAttentionScore` 的 `247300.994 ms` 除以 4 卡后约为 `61.825s/device`，和 20-step 生成墙钟约 `123s` 并不矛盾。
+- 多 stream、通信/计算 overlap、profile 采集开销也会让“各算子累计和”大于端到端墙钟时间。
+- 因此这张表只用于判断热点排序和优化方向，不应用来直接和 `Generating video used time` 做绝对值对比。
+
 判断：
 
 - Python 外层组合优化很难再吃到稳定收益。
@@ -457,4 +465,3 @@ out = attention_forward(
 5. 性能验证跑 `--sample_steps 20`，主看 `Generating video used time`。
 6. 达到 1% 后才跑 detailed profile。
 7. 不要把 profile 目录、tar 包、`tmp/`、本地未跟踪产物加入提交。
-
